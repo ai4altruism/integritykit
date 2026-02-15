@@ -13,9 +13,21 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from integritykit.models.cluster import Cluster, PriorityScores
+from integritykit.models.cop_candidate import (
+    COPCandidate,
+    COPCandidateCreate,
+    COPFields,
+    COPWhen,
+    Evidence,
+    RecommendedAction,
+    ActionType,
+    SlackPermalink,
+    CandidateConflict,
+)
 from integritykit.models.signal import Signal
 from integritykit.services.database import (
     ClusterRepository,
+    COPCandidateRepository,
     SignalRepository,
     get_collection,
 )
@@ -140,7 +152,7 @@ class BacklogItem:
 
 
 class BacklogService:
-    """Service for managing the facilitator backlog (FR-BACKLOG-001).
+    """Service for managing the facilitator backlog (FR-BACKLOG-001, FR-BACKLOG-002).
 
     The backlog contains unpromoted clusters ordered by priority.
     Access is restricted to facilitators and verifiers.
@@ -150,15 +162,18 @@ class BacklogService:
         self,
         cluster_repo: Optional[ClusterRepository] = None,
         signal_repo: Optional[SignalRepository] = None,
+        candidate_repo: Optional[COPCandidateRepository] = None,
     ):
         """Initialize backlog service.
 
         Args:
             cluster_repo: Cluster repository (optional)
             signal_repo: Signal repository (optional)
+            candidate_repo: COP candidate repository (optional)
         """
         self.cluster_repo = cluster_repo or ClusterRepository()
         self.signal_repo = signal_repo or SignalRepository()
+        self.candidate_repo = candidate_repo or COPCandidateRepository()
 
     async def get_backlog(
         self,
@@ -314,6 +329,142 @@ class BacklogService:
             "items_with_conflicts": conflicts_count,
             "high_priority_items": high_priority_count,
         }
+
+    async def promote_cluster(
+        self,
+        workspace_id: str,
+        cluster_id: ObjectId,
+        promoted_by: ObjectId,
+    ) -> tuple[COPCandidate, Cluster]:
+        """Promote a cluster to COP candidate (FR-BACKLOG-002).
+
+        Creates a new COP candidate from the cluster and marks the cluster
+        as promoted so it no longer appears in the backlog.
+
+        Args:
+            workspace_id: Slack workspace ID
+            cluster_id: Cluster ObjectId to promote
+            promoted_by: User ObjectId performing the promotion
+
+        Returns:
+            Tuple of (created COPCandidate, updated Cluster)
+
+        Raises:
+            ValueError: If cluster not found, already promoted, or workspace mismatch
+        """
+        # Get the cluster
+        cluster = await self.cluster_repo.get_by_id(cluster_id)
+        if not cluster:
+            raise ValueError("Cluster not found")
+
+        # Verify workspace scope
+        if cluster.slack_workspace_id != workspace_id:
+            raise ValueError("Cluster does not belong to this workspace")
+
+        # Check if already promoted
+        if cluster.promoted_to_candidate:
+            raise ValueError("Cluster is already promoted to a COP candidate")
+
+        # Get sample signals for evidence
+        signals = []
+        if cluster.signal_ids:
+            signals = await self._get_all_signals(cluster.signal_ids)
+
+        # Build initial COP fields from cluster data
+        cop_fields = COPFields(
+            what=cluster.summary or cluster.topic,
+            where="",  # To be filled by facilitator
+            when=COPWhen(
+                description="Time not yet specified",
+            ),
+            who="",  # To be filled by facilitator
+            so_what="",  # To be filled by facilitator
+        )
+
+        # Build evidence from signals
+        slack_permalinks = [
+            SlackPermalink(
+                url=s.slack_permalink,
+                signal_id=s.id,
+                description=s.content[:100] + "..." if len(s.content) > 100 else s.content,
+            )
+            for s in signals
+            if s.slack_permalink
+        ]
+        evidence = Evidence(slack_permalinks=slack_permalinks)
+
+        # Copy conflicts from cluster
+        candidate_conflicts = [
+            CandidateConflict(
+                conflict_id=c.id,
+                status="unresolved" if not c.resolved else "resolved",
+                resolution_notes=c.resolution.reasoning if c.resolution else None,
+            )
+            for c in cluster.conflicts
+        ]
+
+        # Determine missing fields
+        missing_fields = ["where", "when", "who", "so_what"]
+        if not cluster.summary:
+            missing_fields.append("what")
+
+        # Set recommended action based on state
+        if candidate_conflicts and any(c.status == "unresolved" for c in candidate_conflicts):
+            recommended_action = RecommendedAction(
+                action_type=ActionType.RESOLVE_CONFLICT,
+                reason="Cluster has unresolved conflicts that should be addressed",
+                alternatives=["assign_verification", "add_evidence"],
+            )
+        elif missing_fields:
+            recommended_action = RecommendedAction(
+                action_type=ActionType.ADD_EVIDENCE,
+                reason=f"Missing fields: {', '.join(missing_fields)}",
+                alternatives=["assign_verification"],
+            )
+        else:
+            recommended_action = RecommendedAction(
+                action_type=ActionType.ASSIGN_VERIFICATION,
+                reason="Candidate is ready for verification",
+                alternatives=[],
+            )
+
+        # Create the COP candidate
+        candidate_data = COPCandidateCreate(
+            cluster_id=cluster_id,
+            primary_signal_ids=cluster.signal_ids[:5],  # Top 5 signals
+            created_by=promoted_by,
+            fields=cop_fields,
+        )
+
+        candidate = await self.candidate_repo.create(candidate_data)
+
+        # Update candidate with computed fields (not in create schema)
+        from datetime import datetime
+        await self.candidate_repo.update(
+            candidate.id,
+            {
+                "evidence": evidence.model_dump(),
+                "conflicts": [c.model_dump() for c in candidate_conflicts],
+                "missing_fields": missing_fields,
+                "recommended_action": recommended_action.model_dump(),
+                "readiness_updated_by": promoted_by,
+            },
+        )
+
+        # Refetch candidate with all fields
+        candidate = await self.candidate_repo.get_by_id(candidate.id)
+
+        # Mark cluster as promoted
+        updated_cluster = await self.cluster_repo.update(
+            cluster_id,
+            {
+                "promoted_to_candidate": True,
+                "cop_candidate_id": candidate.id,
+                "updated_at": datetime.utcnow(),
+            },
+        )
+
+        return candidate, updated_cluster
 
     async def _get_sample_signals(self, signal_ids: list[ObjectId]) -> list[Signal]:
         """Get sample signals by IDs.

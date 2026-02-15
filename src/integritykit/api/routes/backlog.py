@@ -15,8 +15,11 @@ from pydantic import BaseModel, Field
 
 from integritykit.api.dependencies import (
     CurrentUser,
+    RequirePromoteCluster,
     RequireViewBacklog,
 )
+from integritykit.models.audit import AuditActionType, AuditTargetType
+from integritykit.services.audit import AuditService, get_audit_service
 from integritykit.services.backlog import BacklogService, get_backlog_service
 
 router = APIRouter(prefix="/backlog", tags=["Backlog"])
@@ -289,3 +292,109 @@ async def get_backlog_item(
     }
 
     return {"data": response_data}
+
+
+class PromoteRequest(BaseModel):
+    """Request body for promoting a cluster."""
+
+    justification: Optional[str] = Field(
+        default=None,
+        description="Reason for promotion",
+    )
+
+
+class COPCandidateResponse(BaseModel):
+    """Response for newly created COP candidate."""
+
+    id: str
+    cluster_id: str
+    readiness_state: str
+    risk_tier: str
+    fields: dict
+    missing_fields: list[str]
+    has_conflicts: bool
+    recommended_action: Optional[dict] = None
+    created_at: str
+    created_by: str
+
+
+@router.post("/{cluster_id}/promote", response_model=dict)
+async def promote_cluster(
+    cluster_id: str,
+    user: CurrentUser,
+    _: None = RequirePromoteCluster,
+    request_body: Optional[PromoteRequest] = None,
+    backlog_service: BacklogService = Depends(get_backlog_service),
+    audit_service: AuditService = Depends(get_audit_service),
+) -> dict:
+    """Promote a cluster from backlog to COP candidate (FR-BACKLOG-002).
+
+    Creates a new COP candidate from the cluster, marking it as promoted
+    so it no longer appears in the backlog. The candidate enters the
+    verification workflow in "in_review" state.
+
+    Args:
+        cluster_id: Cluster ID to promote
+        user: Current authenticated user
+        request_body: Optional justification
+        backlog_service: Backlog service
+        audit_service: Audit service
+
+    Returns:
+        Created COP candidate details
+
+    Raises:
+        HTTPException: If cluster not found, already promoted, or access denied
+    """
+    try:
+        oid = ObjectId(cluster_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid cluster ID format",
+        )
+
+    try:
+        candidate, cluster = await backlog_service.promote_cluster(
+            workspace_id=user.slack_team_id,
+            cluster_id=oid,
+            promoted_by=user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    # Log the promotion
+    await audit_service.log_action(
+        actor=user,
+        action_type=AuditActionType.COP_CANDIDATE_PROMOTE,
+        target_type=AuditTargetType.COP_CANDIDATE,
+        target_id=candidate.id,
+        changes_before=None,
+        changes_after={
+            "cluster_id": str(cluster.id),
+            "readiness_state": candidate.readiness_state,
+            "risk_tier": candidate.risk_tier,
+        },
+        justification=request_body.justification if request_body else None,
+    )
+
+    # Build response
+    response_data = COPCandidateResponse(
+        id=str(candidate.id),
+        cluster_id=str(candidate.cluster_id),
+        readiness_state=candidate.readiness_state,
+        risk_tier=candidate.risk_tier,
+        fields=candidate.fields.model_dump() if candidate.fields else {},
+        missing_fields=candidate.missing_fields,
+        has_conflicts=candidate.has_unresolved_conflicts,
+        recommended_action=candidate.recommended_action.model_dump()
+        if candidate.recommended_action
+        else None,
+        created_at=candidate.created_at.isoformat(),
+        created_by=str(candidate.created_by),
+    )
+
+    return {"data": response_data.model_dump()}

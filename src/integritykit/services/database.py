@@ -10,6 +10,7 @@ from motor.motor_asyncio import (
 )
 
 from integritykit.models.cluster import Cluster, ClusterCreate
+from integritykit.models.cop_candidate import COPCandidate, COPCandidateCreate
 from integritykit.models.signal import Signal, SignalCreate
 from integritykit.models.user import User, UserCreate, UserRole, RoleChange
 
@@ -888,3 +889,186 @@ class UserRepository:
         if result:
             return User(**result)
         return None
+
+
+class COPCandidateRepository:
+    """Repository for COP candidate CRUD operations (FR-BACKLOG-002)."""
+
+    def __init__(self, collection: Optional[AsyncIOMotorCollection] = None):
+        """Initialize COP candidate repository.
+
+        Args:
+            collection: Motor collection instance (optional, uses default if not provided)
+        """
+        self.collection = collection or get_collection("cop_candidates")
+
+    async def create(self, candidate_data: COPCandidateCreate) -> COPCandidate:
+        """Create a new COP candidate document.
+
+        Args:
+            candidate_data: COP candidate creation data
+
+        Returns:
+            Created COPCandidate instance with ID
+        """
+        from datetime import datetime
+
+        candidate = COPCandidate(
+            **candidate_data.model_dump(),
+        )
+
+        # Convert to dict for MongoDB insertion
+        candidate_dict = candidate.model_dump(by_alias=True, exclude={"id"})
+
+        result = await self.collection.insert_one(candidate_dict)
+        candidate.id = result.inserted_id
+
+        return candidate
+
+    async def get_by_id(self, candidate_id: ObjectId) -> Optional[COPCandidate]:
+        """Get COP candidate by MongoDB ObjectId.
+
+        Args:
+            candidate_id: COP candidate ObjectId
+
+        Returns:
+            COPCandidate instance or None if not found
+        """
+        doc = await self.collection.find_one({"_id": candidate_id})
+        if doc:
+            return COPCandidate(**doc)
+        return None
+
+    async def get_by_cluster_id(self, cluster_id: ObjectId) -> Optional[COPCandidate]:
+        """Get COP candidate by source cluster ID.
+
+        Args:
+            cluster_id: Source cluster ObjectId
+
+        Returns:
+            COPCandidate instance or None if not found
+        """
+        doc = await self.collection.find_one({"cluster_id": cluster_id})
+        if doc:
+            return COPCandidate(**doc)
+        return None
+
+    async def update(
+        self,
+        candidate_id: ObjectId,
+        updates: dict,
+    ) -> Optional[COPCandidate]:
+        """Update COP candidate by ID.
+
+        Args:
+            candidate_id: COP candidate ObjectId
+            updates: Dictionary of fields to update
+
+        Returns:
+            Updated COPCandidate instance or None if not found
+        """
+        from datetime import datetime
+
+        updates["updated_at"] = datetime.utcnow()
+
+        result = await self.collection.find_one_and_update(
+            {"_id": candidate_id},
+            {"$set": updates},
+            return_document=True,
+        )
+        if result:
+            return COPCandidate(**result)
+        return None
+
+    async def update_readiness_state(
+        self,
+        candidate_id: ObjectId,
+        new_state: str,
+        updated_by: ObjectId,
+    ) -> Optional[COPCandidate]:
+        """Update COP candidate readiness state.
+
+        Args:
+            candidate_id: COP candidate ObjectId
+            new_state: New readiness state
+            updated_by: User making the change
+
+        Returns:
+            Updated COPCandidate instance or None if not found
+        """
+        from datetime import datetime
+
+        now = datetime.utcnow()
+
+        result = await self.collection.find_one_and_update(
+            {"_id": candidate_id},
+            {
+                "$set": {
+                    "readiness_state": new_state,
+                    "readiness_updated_at": now,
+                    "readiness_updated_by": updated_by,
+                    "updated_at": now,
+                }
+            },
+            return_document=True,
+        )
+        if result:
+            return COPCandidate(**result)
+        return None
+
+    async def list_by_workspace(
+        self,
+        cluster_ids: list[ObjectId],
+        readiness_state: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[COPCandidate]:
+        """List COP candidates by cluster IDs (workspace scope).
+
+        Args:
+            cluster_ids: List of cluster IDs to filter by
+            readiness_state: Filter by state (optional)
+            limit: Maximum number of candidates to return
+            offset: Number of candidates to skip
+
+        Returns:
+            List of COPCandidate instances
+        """
+        query: dict = {"cluster_id": {"$in": cluster_ids}}
+
+        if readiness_state:
+            query["readiness_state"] = readiness_state
+
+        cursor = (
+            self.collection.find(query)
+            .sort("updated_at", -1)
+            .skip(offset)
+            .limit(limit)
+        )
+
+        candidates = []
+        async for doc in cursor:
+            candidates.append(COPCandidate(**doc))
+
+        return candidates
+
+    async def count_by_state(
+        self,
+        cluster_ids: list[ObjectId],
+        readiness_state: str,
+    ) -> int:
+        """Count COP candidates by state.
+
+        Args:
+            cluster_ids: List of cluster IDs to filter by
+            readiness_state: State to count
+
+        Returns:
+            Count of matching candidates
+        """
+        return await self.collection.count_documents(
+            {
+                "cluster_id": {"$in": cluster_ids},
+                "readiness_state": readiness_state,
+            }
+        )

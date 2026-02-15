@@ -501,6 +501,59 @@ class AuditService:
 
         return await self.repository.create(entry_data)
 
+    async def log_action(
+        self,
+        actor: User,
+        action_type: AuditActionType,
+        target_type: AuditTargetType,
+        target_id: ObjectId,
+        changes_before: Optional[dict[str, Any]] = None,
+        changes_after: Optional[dict[str, Any]] = None,
+        justification: Optional[str] = None,
+        system_context: Optional[dict[str, Any]] = None,
+        actor_ip: Optional[str] = None,
+        is_flagged: bool = False,
+        flag_reason: Optional[str] = None,
+    ) -> AuditLogEntry:
+        """Log a generic action (FR-AUD-001).
+
+        Args:
+            actor: User who performed the action
+            action_type: Type of action performed
+            target_type: Type of target entity
+            target_id: ID of target entity
+            changes_before: State before action
+            changes_after: State after action
+            justification: Reason for action
+            system_context: Additional system context
+            actor_ip: IP address of actor
+            is_flagged: Whether to flag for abuse detection
+            flag_reason: Reason for flagging
+
+        Returns:
+            Created AuditLogEntry
+        """
+        actor_role = self._get_highest_role(actor)
+
+        entry_data = AuditLogCreate(
+            actor_id=actor.id,
+            actor_role=actor_role,
+            actor_ip=actor_ip,
+            action_type=action_type,
+            target_entity_type=target_type,
+            target_entity_id=target_id,
+            changes=AuditChanges(
+                before=changes_before,
+                after=changes_after,
+            ),
+            justification=justification,
+            system_context=system_context,
+            is_flagged=is_flagged,
+            flag_reason=flag_reason,
+        )
+
+        return await self.repository.create(entry_data)
+
     def _get_highest_role(self, user: User) -> str:
         """Get the highest role for a user.
 

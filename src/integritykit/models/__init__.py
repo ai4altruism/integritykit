@@ -7,6 +7,13 @@ from integritykit.models.cluster import (
     ConflictSeverity,
     PriorityScores,
 )
+from integritykit.models.cop_candidate import (
+    COPCandidate,
+    COPCandidateCreate,
+    COPFields,
+    ReadinessState,
+    RiskTier,
+)
 from integritykit.models.signal import (
     AIFlags,
     PyObjectId,
@@ -22,8 +29,13 @@ __all__ = [
     "ClusterCreate",
     "ConflictRecord",
     "ConflictSeverity",
+    "COPCandidate",
+    "COPCandidateCreate",
+    "COPFields",
     "PriorityScores",
     "PyObjectId",
+    "ReadinessState",
+    "RiskTier",
     "Signal",
     "SignalCreate",
     "SourceQuality",
