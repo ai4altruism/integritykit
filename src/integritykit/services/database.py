@@ -1072,3 +1072,98 @@ class COPCandidateRepository:
                 "readiness_state": readiness_state,
             }
         )
+
+    async def update_readiness_evaluation(
+        self,
+        candidate_id: ObjectId,
+        readiness_state: str,
+        missing_fields: list[str],
+        blocking_issues: list[dict],
+        recommended_action: Optional[dict],
+        updated_by: Optional[ObjectId] = None,
+    ) -> Optional[COPCandidate]:
+        """Update COP candidate with full readiness evaluation results.
+
+        Args:
+            candidate_id: COP candidate ObjectId
+            readiness_state: New readiness state
+            missing_fields: List of missing field names
+            blocking_issues: List of blocking issue dicts
+            recommended_action: Recommended action dict
+            updated_by: User making the change
+
+        Returns:
+            Updated COPCandidate instance or None if not found
+        """
+        from datetime import datetime
+
+        now = datetime.utcnow()
+
+        update_doc = {
+            "readiness_state": readiness_state,
+            "readiness_updated_at": now,
+            "missing_fields": missing_fields,
+            "blocking_issues": blocking_issues,
+            "recommended_action": recommended_action,
+            "updated_at": now,
+        }
+
+        if updated_by:
+            update_doc["readiness_updated_by"] = updated_by
+
+        result = await self.collection.find_one_and_update(
+            {"_id": candidate_id},
+            {"$set": update_doc},
+            return_document=True,
+        )
+        if result:
+            return COPCandidate(**result)
+        return None
+
+    async def list_by_readiness_state(
+        self,
+        workspace_id: str,
+        readiness_state: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[COPCandidate]:
+        """List COP candidates by readiness state within a workspace.
+
+        Args:
+            workspace_id: Workspace/team ID
+            readiness_state: Readiness state to filter by
+            limit: Maximum number of candidates to return
+            offset: Number of candidates to skip
+
+        Returns:
+            List of COPCandidate instances
+        """
+        # First get cluster IDs for this workspace
+        cluster_collection = get_collection("clusters")
+        cluster_ids = []
+        async for doc in cluster_collection.find(
+            {"workspace_id": workspace_id},
+            {"_id": 1},
+        ):
+            cluster_ids.append(doc["_id"])
+
+        if not cluster_ids:
+            return []
+
+        query = {
+            "cluster_id": {"$in": cluster_ids},
+            "readiness_state": readiness_state,
+        }
+
+        cursor = (
+            self.collection.find(query)
+            .sort("updated_at", -1)
+            .skip(offset)
+            .limit(limit)
+        )
+
+        candidates = []
+        async for doc in cursor:
+            candidates.append(COPCandidate(**doc))
+
+        return candidates
