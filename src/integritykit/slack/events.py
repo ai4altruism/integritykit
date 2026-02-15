@@ -10,6 +10,8 @@ from slack_sdk.errors import SlackApiError
 
 from integritykit.models.signal import SignalCreate, SourceQuality, SourceQualityType
 from integritykit.services.database import SignalRepository
+from integritykit.slack.api import SlackAPIClient
+from integritykit.utils.retry import RetryConfig, async_retry_with_backoff
 
 logger = structlog.get_logger(__name__)
 
@@ -29,6 +31,7 @@ class SlackEventHandler:
         workspace_id: str,
         monitored_channels: Optional[list[str]] = None,
         filter_bot_messages: bool = True,
+        retry_config: Optional[RetryConfig] = None,
     ):
         """Initialize Slack event handler.
 
@@ -38,12 +41,27 @@ class SlackEventHandler:
             workspace_id: Slack workspace/team ID
             monitored_channels: List of channel IDs to monitor (None = all channels)
             filter_bot_messages: Whether to filter out bot messages
+            retry_config: Retry configuration for Slack API calls
         """
         self.app = app
         self.signal_repository = signal_repository
         self.workspace_id = workspace_id
         self.monitored_channels = monitored_channels
         self.filter_bot_messages = filter_bot_messages
+
+        # Initialize Slack API client with retry logic
+        # Note: app.client.token is the bot token
+        self.slack_client = SlackAPIClient(
+            token=app.client.token,
+            retry_config=retry_config,
+        )
+
+        # Retry config for database operations (separate from API retries)
+        self.db_retry_config = retry_config or RetryConfig(
+            max_retries=3,
+            initial_delay=0.5,
+            max_delay=10.0,
+        )
 
         # Register event listeners
         self._register_listeners()
@@ -98,7 +116,7 @@ class SlackEventHandler:
         channel_id: str,
         message_ts: str,
     ) -> Optional[str]:
-        """Get permalink for a Slack message.
+        """Get permalink for a Slack message with retry logic.
 
         Args:
             channel_id: Slack channel ID
@@ -108,16 +126,124 @@ class SlackEventHandler:
             Permalink URL or None if failed
         """
         try:
-            result = await self.app.client.chat_getPermalink(
+            return await self.slack_client.get_permalink(
                 channel=channel_id,
                 message_ts=message_ts,
             )
-            return result["permalink"]
         except SlackApiError as e:
             logger.error(
-                "Failed to get Slack permalink",
+                "Failed to get Slack permalink after retries",
                 error=str(e),
                 channel=channel_id,
+                message_ts=message_ts,
+                status_code=e.response.status_code if e.response else None,
+            )
+            return None
+
+    async def _create_signal_with_retry(
+        self,
+        signal_data: SignalCreate,
+    ) -> Optional[Any]:
+        """Create signal with retry logic and error recovery.
+
+        Args:
+            signal_data: Signal creation data
+
+        Returns:
+            Created signal or None if all retries failed
+        """
+
+        @async_retry_with_backoff(
+            config=self.db_retry_config,
+            retryable_exceptions=(Exception,),
+        )
+        async def _create() -> Any:
+            return await self.signal_repository.create(signal_data)
+
+        try:
+            return await _create()
+        except Exception as e:
+            logger.error(
+                "Failed to create signal after retries - message will be logged for manual recovery",
+                error=str(e),
+                slack_workspace_id=signal_data.slack_workspace_id,
+                slack_channel_id=signal_data.slack_channel_id,
+                slack_message_ts=signal_data.slack_message_ts,
+                slack_permalink=signal_data.slack_permalink,
+                content_preview=signal_data.content[:100] if signal_data.content else None,
+            )
+            # TODO: Implement dead-letter queue for manual recovery
+            return None
+
+    async def _update_signal_with_retry(
+        self,
+        signal_id: Any,
+        updates: dict,
+    ) -> Optional[Any]:
+        """Update signal with retry logic.
+
+        Args:
+            signal_id: Signal ID
+            updates: Update dictionary
+
+        Returns:
+            Updated signal or None if failed
+        """
+
+        @async_retry_with_backoff(
+            config=self.db_retry_config,
+            retryable_exceptions=(Exception,),
+        )
+        async def _update() -> Any:
+            return await self.signal_repository.update(signal_id, updates)
+
+        try:
+            return await _update()
+        except Exception as e:
+            logger.error(
+                "Failed to update signal after retries",
+                error=str(e),
+                signal_id=str(signal_id),
+                updates=updates,
+            )
+            return None
+
+    async def _get_signal_by_slack_ts_with_retry(
+        self,
+        workspace_id: str,
+        channel_id: str,
+        message_ts: str,
+    ) -> Optional[Any]:
+        """Get signal by Slack timestamp with retry logic.
+
+        Args:
+            workspace_id: Slack workspace ID
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+
+        Returns:
+            Signal or None if not found or failed
+        """
+
+        @async_retry_with_backoff(
+            config=self.db_retry_config,
+            retryable_exceptions=(Exception,),
+        )
+        async def _get() -> Optional[Any]:
+            return await self.signal_repository.get_by_slack_ts(
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                message_ts=message_ts,
+            )
+
+        try:
+            return await _get()
+        except Exception as e:
+            logger.error(
+                "Failed to get signal by Slack timestamp after retries",
+                error=str(e),
+                workspace_id=workspace_id,
+                channel_id=channel_id,
                 message_ts=message_ts,
             )
             return None
@@ -204,7 +330,7 @@ class SlackEventHandler:
         source_quality = self._extract_source_quality(text)
 
         # Check if signal already exists (idempotency)
-        existing = await self.signal_repository.get_by_slack_ts(
+        existing = await self._get_signal_by_slack_ts_with_retry(
             workspace_id=self.workspace_id,
             channel_id=channel_id,
             message_ts=message_ts,
@@ -232,39 +358,42 @@ class SlackEventHandler:
             source_quality=source_quality,
         )
 
-        try:
-            signal = await self.signal_repository.create(signal_data)
-            logger.info(
-                "Signal created",
-                signal_id=str(signal.id),
-                channel=channel_id,
-                message_ts=message_ts,
-                source_type=source_quality.type,
-                is_firsthand=source_quality.is_firsthand,
-                has_external_links=source_quality.has_external_link,
-            )
+        # Create signal with retry logic
+        signal = await self._create_signal_with_retry(signal_data)
 
-            # TODO: Queue for embedding generation and clustering (S1-2)
-            # For now, just mark in metadata
-            await self.signal_repository.update(
-                signal.id,
-                {
-                    "ai_generated_metadata": {
-                        "pending_embedding": True,
-                        "pending_clustering": True,
-                        "ingested_at": datetime.utcnow().isoformat(),
-                    }
-                },
-            )
-
-        except Exception as e:
+        if not signal:
             logger.error(
-                "Failed to create signal",
-                error=str(e),
+                "Failed to create signal after retries - message lost",
                 channel=channel_id,
                 message_ts=message_ts,
+                permalink=permalink,
             )
-            raise
+            # Don't raise - allow event handler to complete
+            # Message is logged above for manual recovery
+            return
+
+        logger.info(
+            "Signal created",
+            signal_id=str(signal.id),
+            channel=channel_id,
+            message_ts=message_ts,
+            source_type=source_quality.type,
+            is_firsthand=source_quality.is_firsthand,
+            has_external_links=source_quality.has_external_link,
+        )
+
+        # TODO: Queue for embedding generation and clustering (S1-2)
+        # For now, just mark in metadata
+        await self._update_signal_with_retry(
+            signal.id,
+            {
+                "ai_generated_metadata": {
+                    "pending_embedding": True,
+                    "pending_clustering": True,
+                    "ingested_at": datetime.utcnow().isoformat(),
+                }
+            },
+        )
 
     async def handle_message_changed(self, event: dict[str, Any], say: Any) -> None:
         """Handle message edit events.
@@ -288,8 +417,8 @@ class SlackEventHandler:
             message_ts=message_ts,
         )
 
-        # Find existing signal
-        existing = await self.signal_repository.get_by_slack_ts(
+        # Find existing signal with retry
+        existing = await self._get_signal_by_slack_ts_with_retry(
             workspace_id=self.workspace_id,
             channel_id=channel_id,
             message_ts=message_ts,
@@ -306,8 +435,8 @@ class SlackEventHandler:
         # Extract new source quality
         source_quality = self._extract_source_quality(text)
 
-        # Update signal content
-        await self.signal_repository.update(
+        # Update signal content with retry
+        updated = await self._update_signal_with_retry(
             existing.id,
             {
                 "content": text,
@@ -322,12 +451,20 @@ class SlackEventHandler:
             },
         )
 
-        logger.info(
-            "Signal updated after message edit",
-            signal_id=str(existing.id),
-            channel=channel_id,
-            message_ts=message_ts,
-        )
+        if updated:
+            logger.info(
+                "Signal updated after message edit",
+                signal_id=str(existing.id),
+                channel=channel_id,
+                message_ts=message_ts,
+            )
+        else:
+            logger.error(
+                "Failed to update signal after message edit",
+                signal_id=str(existing.id),
+                channel=channel_id,
+                message_ts=message_ts,
+            )
 
     async def handle_message_deleted(self, event: dict[str, Any], say: Any) -> None:
         """Handle message deletion events.
@@ -349,8 +486,8 @@ class SlackEventHandler:
             deleted_ts=deleted_ts,
         )
 
-        # Find existing signal
-        existing = await self.signal_repository.get_by_slack_ts(
+        # Find existing signal with retry
+        existing = await self._get_signal_by_slack_ts_with_retry(
             workspace_id=self.workspace_id,
             channel_id=channel_id,
             message_ts=deleted_ts,
@@ -364,8 +501,8 @@ class SlackEventHandler:
             )
             return
 
-        # Mark signal as redacted (don't delete for audit trail)
-        await self.signal_repository.update(
+        # Mark signal as redacted with retry (don't delete for audit trail)
+        updated = await self._update_signal_with_retry(
             existing.id,
             {
                 "redacted": True,
@@ -378,9 +515,17 @@ class SlackEventHandler:
             },
         )
 
-        logger.info(
-            "Signal marked as redacted after message deletion",
-            signal_id=str(existing.id),
-            channel=channel_id,
-            deleted_ts=deleted_ts,
-        )
+        if updated:
+            logger.info(
+                "Signal marked as redacted after message deletion",
+                signal_id=str(existing.id),
+                channel=channel_id,
+                deleted_ts=deleted_ts,
+            )
+        else:
+            logger.error(
+                "Failed to mark signal as redacted after message deletion",
+                signal_id=str(existing.id),
+                channel=channel_id,
+                deleted_ts=deleted_ts,
+            )
