@@ -66,6 +66,20 @@ class Settings(BaseSettings):
         description="Filter out bot messages from ingestion",
     )
 
+    # Slack retry settings
+    slack_retry_max_attempts: int = Field(
+        default=3,
+        description="Maximum number of retry attempts for Slack API calls",
+    )
+    slack_retry_initial_delay: float = Field(
+        default=1.0,
+        description="Initial delay in seconds before first retry",
+    )
+    slack_retry_max_delay: float = Field(
+        default=60.0,
+        description="Maximum delay in seconds between retries",
+    )
+
     # ChromaDB settings
     chromadb_host: str = Field(
         default="localhost",
