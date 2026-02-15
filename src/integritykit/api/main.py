@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from integritykit.config import settings
 from integritykit.services.database import close_mongodb_connection, connect_to_mongodb
+from integritykit.api.routes import audit, backlog, search, users
 
 logger = structlog.get_logger(__name__)
 
@@ -56,6 +57,12 @@ app = FastAPI(
     description="Aid Arena Integrity Kit - Slack coordination layer for crisis-response COP updates",
     lifespan=lifespan,
 )
+
+# Register API routers
+app.include_router(users.router, prefix="/api/v1")
+app.include_router(audit.router, prefix="/api/v1")
+app.include_router(backlog.router, prefix="/api/v1")
+app.include_router(search.router, prefix="/api/v1")
 
 
 @app.get("/health")
