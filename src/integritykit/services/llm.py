@@ -1,7 +1,7 @@
 """LLM service for cluster classification, summarization, and priority assessment."""
 
 import json
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 from openai import AsyncOpenAI
@@ -14,6 +14,7 @@ from integritykit.llm.prompts.clustering import (
 )
 from integritykit.models.cluster import Cluster, PriorityScores
 from integritykit.models.signal import Signal
+from integritykit.utils.ai_metadata import AIOperationType, create_ai_metadata
 
 logger = structlog.get_logger(__name__)
 
@@ -38,12 +39,40 @@ class LLMService:
         self.model = model
         self.temperature = temperature
 
+    def _create_response_metadata(
+        self,
+        operation: AIOperationType,
+        response: Any,
+        confidence: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Create AI metadata for an LLM response.
+
+        Args:
+            operation: Type of AI operation
+            response: OpenAI response object
+            confidence: Optional confidence score
+
+        Returns:
+            AI metadata dictionary
+        """
+        return create_ai_metadata(
+            model=self.model,
+            operation=operation,
+            confidence=confidence,
+            temperature=self.temperature,
+            token_usage={
+                "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') else None,
+                "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') else None,
+                "total_tokens": response.usage.total_tokens if hasattr(response, 'usage') else None,
+            },
+        )
+
     async def classify_cluster_assignment(
         self,
         signal: Signal,
         existing_clusters: list[Cluster],
         thread_context: str = "",
-    ) -> ClusteringOutput:
+    ) -> dict[str, Any]:
         """Classify whether signal belongs to existing cluster or creates new one.
 
         Args:
@@ -94,16 +123,32 @@ class LLMService:
             content = response.content if hasattr(response, 'content') else response.choices[0].message.content
             result = json.loads(content)
 
+            # Add AI metadata
+            ai_metadata = create_ai_metadata(
+                model=self.model,
+                operation=AIOperationType.CLUSTERING,
+                confidence=result.get("confidence"),
+                temperature=self.temperature,
+                token_usage={
+                    "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') else None,
+                    "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') else None,
+                    "total_tokens": response.usage.total_tokens if hasattr(response, 'usage') else None,
+                },
+            )
+
+            result["ai_metadata"] = ai_metadata
+
             logger.info(
-                "Classified cluster assignment",
+                "AI-classified cluster assignment",
                 signal_id=str(signal.id),
                 assignment=result.get("assignment"),
                 confidence=result.get("confidence"),
                 cluster_id=result.get("cluster_id"),
                 model=self.model,
+                ai_generated=True,
             )
 
-            return ClusteringOutput(**result)
+            return result
 
         except Exception as e:
             logger.error(
@@ -165,11 +210,12 @@ Generate a summary of this cluster (2-3 sentences):"""
             summary = response.choices[0].message.content
 
             logger.info(
-                "Generated cluster summary",
+                "AI-generated cluster summary",
                 topic=topic,
                 signal_count=len(signals),
                 summary_length=len(summary),
                 model=self.model,
+                ai_generated=True,
             )
 
             return summary
@@ -261,13 +307,14 @@ Assess the priority of this cluster:"""
             priority_scores = PriorityScores(**result)
 
             logger.info(
-                "Assessed cluster priority",
+                "AI-assessed cluster priority",
                 cluster_id=str(cluster.id),
                 urgency=priority_scores.urgency,
                 impact=priority_scores.impact,
                 risk=priority_scores.risk,
                 composite=priority_scores.composite_score,
                 model=self.model,
+                ai_generated=True,
             )
 
             return priority_scores
@@ -318,10 +365,11 @@ Generate a topic name for this message:"""
             topic = response.choices[0].message.content.strip()
 
             logger.info(
-                "Generated topic from signal",
+                "AI-generated topic from signal",
                 signal_id=str(signal.id),
                 topic=topic,
                 model=self.model,
+                ai_generated=True,
             )
 
             return topic

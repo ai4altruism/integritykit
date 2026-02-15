@@ -8,6 +8,7 @@ from chromadb.api.types import EmbeddingFunction
 from openai import AsyncOpenAI
 
 from integritykit.models.signal import Signal
+from integritykit.utils.ai_metadata import AIOperationType, create_ai_metadata
 
 logger = structlog.get_logger(__name__)
 
@@ -142,6 +143,13 @@ class EmbeddingService:
             )
             embedding = response.data[0].embedding
 
+            # Create AI metadata for embedding
+            ai_metadata = create_ai_metadata(
+                model=self.embedding_model,
+                operation=AIOperationType.EMBEDDING_GENERATION,
+                embedding_dimension=len(embedding),
+            )
+
             # Store in ChromaDB
             collection = await self.create_collection(collection_name)
             collection.add(
@@ -153,16 +161,21 @@ class EmbeddingService:
                         "slack_channel_id": signal.slack_channel_id,
                         "slack_message_ts": signal.slack_message_ts,
                         "created_at": signal.created_at.isoformat(),
+                        "ai_generated": True,
+                        "embedding_model": self.embedding_model,
+                        "generated_at": ai_metadata["generated_at"],
                     }
                 ],
                 documents=[signal.content],
             )
 
             logger.info(
-                "Added signal embedding to ChromaDB",
+                "Added AI-generated signal embedding to ChromaDB",
                 signal_id=signal_id,
                 collection=collection_name,
                 embedding_dim=len(embedding),
+                model=self.embedding_model,
+                ai_generated=True,
             )
 
             return signal_id
