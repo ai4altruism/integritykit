@@ -9,6 +9,7 @@ from motor.motor_asyncio import (
     AsyncIOMotorDatabase,
 )
 
+from integritykit.models.cluster import Cluster, ClusterCreate
 from integritykit.models.signal import Signal, SignalCreate
 
 # Global MongoDB client (initialized at startup)
@@ -228,3 +229,202 @@ class SignalRepository:
             signals.append(Signal(**doc))
 
         return signals
+
+
+class ClusterRepository:
+    """Repository for cluster CRUD operations."""
+
+    def __init__(self, collection: Optional[AsyncIOMotorCollection] = None):
+        """Initialize cluster repository.
+
+        Args:
+            collection: Motor collection instance (optional, uses default if not provided)
+        """
+        self.collection = collection or get_collection("clusters")
+
+    async def create(self, cluster_data: ClusterCreate) -> Cluster:
+        """Create a new cluster document.
+
+        Args:
+            cluster_data: Cluster creation data
+
+        Returns:
+            Created Cluster instance with ID
+        """
+        cluster = Cluster(
+            **cluster_data.model_dump(),
+        )
+
+        # Convert to dict for MongoDB insertion
+        cluster_dict = cluster.model_dump(by_alias=True, exclude={"id"})
+
+        result = await self.collection.insert_one(cluster_dict)
+        cluster.id = result.inserted_id
+
+        return cluster
+
+    async def get_by_id(self, cluster_id: ObjectId) -> Optional[Cluster]:
+        """Get cluster by MongoDB ObjectId.
+
+        Args:
+            cluster_id: Cluster ObjectId
+
+        Returns:
+            Cluster instance or None if not found
+        """
+        doc = await self.collection.find_one({"_id": cluster_id})
+        if doc:
+            return Cluster(**doc)
+        return None
+
+    async def update(
+        self,
+        cluster_id: ObjectId,
+        updates: dict,
+    ) -> Optional[Cluster]:
+        """Update cluster by ID.
+
+        Args:
+            cluster_id: Cluster ObjectId
+            updates: Dictionary of fields to update
+
+        Returns:
+            Updated Cluster instance or None if not found
+        """
+        result = await self.collection.find_one_and_update(
+            {"_id": cluster_id},
+            {"$set": updates},
+            return_document=True,
+        )
+        if result:
+            return Cluster(**result)
+        return None
+
+    async def add_signal(
+        self,
+        cluster_id: ObjectId,
+        signal_id: ObjectId,
+    ) -> Optional[Cluster]:
+        """Add signal to a cluster.
+
+        Args:
+            cluster_id: Cluster ObjectId
+            signal_id: Signal ObjectId to add
+
+        Returns:
+            Updated Cluster instance or None if not found
+        """
+        from datetime import datetime
+
+        result = await self.collection.find_one_and_update(
+            {"_id": cluster_id},
+            {
+                "$addToSet": {"signal_ids": signal_id},
+                "$set": {"updated_at": datetime.utcnow()},
+            },
+            return_document=True,
+        )
+        if result:
+            return Cluster(**result)
+        return None
+
+    async def list_by_workspace(
+        self,
+        workspace_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Cluster]:
+        """List clusters by workspace with pagination.
+
+        Args:
+            workspace_id: Slack workspace ID
+            limit: Maximum number of clusters to return
+            offset: Number of clusters to skip
+
+        Returns:
+            List of Cluster instances
+        """
+        cursor = (
+            self.collection.find({"slack_workspace_id": workspace_id})
+            .sort("updated_at", -1)
+            .skip(offset)
+            .limit(limit)
+        )
+
+        clusters = []
+        async for doc in cursor:
+            clusters.append(Cluster(**doc))
+
+        return clusters
+
+    async def list_unpromoted_clusters(
+        self,
+        workspace_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Cluster]:
+        """List unpromoted clusters for backlog, ordered by priority.
+
+        Args:
+            workspace_id: Slack workspace ID
+            limit: Maximum number of clusters to return
+            offset: Number of clusters to skip
+
+        Returns:
+            List of Cluster instances ordered by composite priority score descending
+        """
+        cursor = (
+            self.collection.find(
+                {
+                    "slack_workspace_id": workspace_id,
+                    "promoted_to_candidate": False,
+                }
+            )
+            .sort(
+                [
+                    # Sort by composite priority (calculated from urgency, impact, risk)
+                    ("priority_scores.urgency", -1),
+                    ("priority_scores.impact", -1),
+                    ("priority_scores.risk", -1),
+                    ("updated_at", -1),
+                ]
+            )
+            .skip(offset)
+            .limit(limit)
+        )
+
+        clusters = []
+        async for doc in cursor:
+            clusters.append(Cluster(**doc))
+
+        return clusters
+
+    async def update_priority_scores(
+        self,
+        cluster_id: ObjectId,
+        priority_scores: dict,
+    ) -> Optional[Cluster]:
+        """Update cluster priority scores.
+
+        Args:
+            cluster_id: Cluster ObjectId
+            priority_scores: PriorityScores as dict
+
+        Returns:
+            Updated Cluster instance or None if not found
+        """
+        from datetime import datetime
+
+        result = await self.collection.find_one_and_update(
+            {"_id": cluster_id},
+            {
+                "$set": {
+                    "priority_scores": priority_scores,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+            return_document=True,
+        )
+        if result:
+            return Cluster(**result)
+        return None
