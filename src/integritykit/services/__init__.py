@@ -1,8 +1,19 @@
 """Services for IntegrityKit business logic."""
 
-from integritykit.services.database import SignalRepository, get_database
+from integritykit.services.clustering import ClusteringService
+from integritykit.services.database import (
+    ClusterRepository,
+    SignalRepository,
+    get_database,
+)
+from integritykit.services.embedding import EmbeddingService
+from integritykit.services.llm import LLMService
 
 __all__ = [
+    "ClusterRepository",
+    "ClusteringService",
+    "EmbeddingService",
+    "LLMService",
     "SignalRepository",
     "get_database",
 ]

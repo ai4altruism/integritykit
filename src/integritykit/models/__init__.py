@@ -1,5 +1,12 @@
 """Pydantic models for IntegrityKit domain objects."""
 
+from integritykit.models.cluster import (
+    Cluster,
+    ClusterCreate,
+    ConflictRecord,
+    ConflictSeverity,
+    PriorityScores,
+)
 from integritykit.models.signal import (
     AIFlags,
     PyObjectId,
@@ -11,6 +18,11 @@ from integritykit.models.signal import (
 
 __all__ = [
     "AIFlags",
+    "Cluster",
+    "ClusterCreate",
+    "ConflictRecord",
+    "ConflictSeverity",
+    "PriorityScores",
     "PyObjectId",
     "Signal",
     "SignalCreate",
