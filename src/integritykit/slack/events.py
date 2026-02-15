@@ -9,6 +9,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.errors import SlackApiError
 
 from integritykit.models.signal import SignalCreate, SourceQuality, SourceQualityType
+from integritykit.services.clustering import ClusteringService
 from integritykit.services.database import SignalRepository
 
 logger = structlog.get_logger(__name__)
@@ -29,6 +30,7 @@ class SlackEventHandler:
         workspace_id: str,
         monitored_channels: Optional[list[str]] = None,
         filter_bot_messages: bool = True,
+        clustering_service: Optional[ClusteringService] = None,
     ):
         """Initialize Slack event handler.
 
@@ -38,12 +40,14 @@ class SlackEventHandler:
             workspace_id: Slack workspace/team ID
             monitored_channels: List of channel IDs to monitor (None = all channels)
             filter_bot_messages: Whether to filter out bot messages
+            clustering_service: Optional clustering service for signal processing
         """
         self.app = app
         self.signal_repository = signal_repository
         self.workspace_id = workspace_id
         self.monitored_channels = monitored_channels
         self.filter_bot_messages = filter_bot_messages
+        self.clustering_service = clustering_service
 
         # Register event listeners
         self._register_listeners()
@@ -244,18 +248,46 @@ class SlackEventHandler:
                 has_external_links=source_quality.has_external_link,
             )
 
-            # TODO: Queue for embedding generation and clustering (S1-2)
-            # For now, just mark in metadata
-            await self.signal_repository.update(
-                signal.id,
-                {
-                    "ai_generated_metadata": {
-                        "pending_embedding": True,
-                        "pending_clustering": True,
-                        "ingested_at": datetime.utcnow().isoformat(),
-                    }
-                },
-            )
+            # Process signal through clustering service
+            if self.clustering_service:
+                try:
+                    cluster = await self.clustering_service.process_new_signal(signal)
+                    logger.info(
+                        "Signal clustered successfully",
+                        signal_id=str(signal.id),
+                        cluster_id=str(cluster.id),
+                        cluster_topic=cluster.topic,
+                    )
+                except Exception as e:
+                    # Don't fail ingestion if clustering fails
+                    logger.error(
+                        "Failed to cluster signal, continuing without clustering",
+                        signal_id=str(signal.id),
+                        error=str(e),
+                    )
+                    # Mark as pending clustering for retry
+                    await self.signal_repository.update(
+                        signal.id,
+                        {
+                            "ai_generated_metadata": {
+                                "pending_clustering": True,
+                                "clustering_error": str(e),
+                                "ingested_at": datetime.utcnow().isoformat(),
+                            }
+                        },
+                    )
+            else:
+                # No clustering service configured, mark as pending
+                await self.signal_repository.update(
+                    signal.id,
+                    {
+                        "ai_generated_metadata": {
+                            "pending_embedding": True,
+                            "pending_clustering": True,
+                            "ingested_at": datetime.utcnow().isoformat(),
+                        }
+                    },
+                )
 
         except Exception as e:
             logger.error(
