@@ -20,6 +20,7 @@ from integritykit.api.dependencies import (
     get_user_repository,
 )
 from integritykit.models.user import User, UserResponse, UserRole
+from integritykit.services.audit import AuditService, get_audit_service
 from integritykit.services.database import UserRepository
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -243,6 +244,9 @@ async def assign_role(
             detail=f"User already has role: {request.role.value}",
         )
 
+    # Capture old roles for audit log
+    old_roles = [r.value if isinstance(r, UserRole) else r for r in target_user.roles]
+
     # Add role with audit trail
     updated_user = await user_repo.add_role(
         user_id=target_user_id,
@@ -256,6 +260,17 @@ async def assign_role(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update user",
         )
+
+    # Log to audit trail (FR-ROLE-003)
+    new_roles = [r.value if isinstance(r, UserRole) else r for r in updated_user.roles]
+    audit_service = get_audit_service()
+    await audit_service.log_role_change(
+        actor=current_user,
+        target_user=updated_user,
+        old_roles=old_roles,
+        new_roles=new_roles,
+        justification=request.justification,
+    )
 
     return {
         "data": UserResponse.from_user(updated_user).model_dump(),
@@ -325,6 +340,9 @@ async def revoke_role(
             detail=f"User does not have role: {role.value}",
         )
 
+    # Capture old roles for audit log
+    old_roles = [r.value if isinstance(r, UserRole) else r for r in target_user.roles]
+
     # Remove role with audit trail
     updated_user = await user_repo.remove_role(
         user_id=target_user_id,
@@ -338,6 +356,17 @@ async def revoke_role(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update user",
         )
+
+    # Log to audit trail (FR-ROLE-003)
+    new_roles = [r.value if isinstance(r, UserRole) else r for r in updated_user.roles]
+    audit_service = get_audit_service()
+    await audit_service.log_role_change(
+        actor=current_user,
+        target_user=updated_user,
+        old_roles=old_roles,
+        new_roles=new_roles,
+        justification=justification,
+    )
 
     return {
         "data": UserResponse.from_user(updated_user).model_dump(),
@@ -416,6 +445,14 @@ async def suspend_user(
             detail="Failed to suspend user",
         )
 
+    # Log to audit trail (NFR-ABUSE-002)
+    audit_service = get_audit_service()
+    await audit_service.log_user_suspend(
+        actor=current_user,
+        target_user=updated_user,
+        reason=request.reason,
+    )
+
     return {
         "data": UserResponse.from_user(updated_user).model_dump(),
     }
@@ -485,6 +522,14 @@ async def reinstate_user(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to reinstate user",
         )
+
+    # Log to audit trail
+    audit_service = get_audit_service()
+    await audit_service.log_user_reinstate(
+        actor=current_user,
+        target_user=updated_user,
+        reason=request.reason,
+    )
 
     return {
         "data": UserResponse.from_user(updated_user).model_dump(),
