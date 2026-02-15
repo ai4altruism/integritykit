@@ -1,0 +1,2216 @@
+openapi: "3.1.0"
+
+info:
+  title: Aid Arena Integrity Kit API
+  version: "1.0.0"
+  description: |
+    REST API for the Aid Arena Integrity Kit facilitator workflow.
+
+    Provides endpoints for managing the Common Operating Picture (COP) workflow,
+    including backlog management, candidate verification, COP drafting/publishing,
+    search, metrics, and audit logging.
+
+    **Authentication:** All endpoints require valid Slack OAuth authentication.
+
+    **Authorization:** Role-based access control (RBAC) enforces permissions:
+    - General Participant: Read-only access to published COPs
+    - Facilitator: Full backlog and candidate management
+    - Verifier: Verification actions on candidates
+    - Workspace Admin: User and role management
+  contact:
+    name: Aid Arena Support
+    email: support@aidarena.org
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.integritykit.aidarena.org/api/v1
+    description: Production server
+  - url: https://staging-api.integritykit.aidarena.org/api/v1
+    description: Staging server
+  - url: http://localhost:8000/api/v1
+    description: Local development server
+
+tags:
+  - name: Authentication
+    description: Slack OAuth authentication and user session management
+  - name: Backlog
+    description: Cluster backlog management and prioritization
+  - name: COP Candidates
+    description: COP candidate lifecycle management and verification
+  - name: COP Publishing
+    description: COP draft assembly and publication workflow
+  - name: Search
+    description: Facilitator search across signals, clusters, and candidates
+  - name: Metrics
+    description: Operational metrics and reporting
+  - name: Audit
+    description: Audit log access and compliance reporting
+  - name: Users
+    description: User and role management
+
+security:
+  - slackOAuth: []
+
+paths:
+  # ============================================================================
+  # AUTHENTICATION & USERS
+  # ============================================================================
+
+  /auth/slack/callback:
+    get:
+      tags: [Authentication]
+      summary: Slack OAuth callback
+      description: |
+        Handles Slack OAuth callback after user authorizes the app.
+        Exchanges authorization code for access token and creates/updates user session.
+      operationId: slackOAuthCallback
+      security: []  # Public endpoint
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Authorization code from Slack OAuth flow
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+          description: CSRF protection state parameter
+      responses:
+        "302":
+          description: Redirect to application with session cookie
+          headers:
+            Location:
+              schema:
+                type: string
+              description: Redirect URL
+            Set-Cookie:
+              schema:
+                type: string
+              description: Session cookie
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get current user
+      description: Returns the currently authenticated user with roles and permissions
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: Current user details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /users:
+    get:
+      tags: [Users]
+      summary: List users
+      description: |
+        List all users in the workspace with their roles.
+        Requires workspace_admin role.
+      operationId: listUsers
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: role
+          in: query
+          schema:
+            $ref: "#/components/schemas/UserRole"
+          description: Filter by role
+        - name: is_suspended
+          in: query
+          schema:
+            type: boolean
+          description: Filter by suspension status
+      responses:
+        "200":
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/User"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /users/{user_id}/roles:
+    post:
+      tags: [Users]
+      summary: Assign role to user
+      description: |
+        Add a role to a user. Requires workspace_admin role.
+        Action is logged to audit trail.
+      operationId: assignUserRole
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: User ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role, justification]
+              properties:
+                role:
+                  $ref: "#/components/schemas/UserRole"
+                justification:
+                  type: string
+                  description: Reason for role assignment
+                  minLength: 10
+      responses:
+        "200":
+          description: Role assigned successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [Users]
+      summary: Revoke role from user
+      description: |
+        Remove a role from a user. Requires workspace_admin role.
+        Action is logged to audit trail.
+      operationId: revokeUserRole
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+        - name: role
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/UserRole"
+        - name: justification
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Reason for role revocation
+      responses:
+        "200":
+          description: Role revoked successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ============================================================================
+  # BACKLOG MANAGEMENT
+  # ============================================================================
+
+  /backlog:
+    get:
+      tags: [Backlog]
+      summary: List clusters in backlog
+      description: |
+        Get prioritized list of clusters not yet promoted to COP candidates.
+        Sorted by priority_score (urgency + impact + risk).
+        Clusters with conflicts are highlighted.
+      operationId: listBacklog
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: topic_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/TopicType"
+          description: Filter by topic type
+        - name: has_conflicts
+          in: query
+          schema:
+            type: boolean
+          description: Filter clusters with unresolved conflicts
+        - name: min_priority
+          in: query
+          schema:
+            type: number
+            format: float
+            minimum: 0.0
+            maximum: 1.0
+          description: Minimum priority score threshold
+      responses:
+        "200":
+          description: List of backlog clusters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Cluster"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /backlog/{cluster_id}:
+    get:
+      tags: [Backlog]
+      summary: Get cluster details
+      description: |
+        Retrieve full cluster details including member signals, conflict analysis,
+        and AI-generated summary.
+      operationId: getCluster
+      parameters:
+        - name: cluster_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      responses:
+        "200":
+          description: Cluster details with signals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /backlog/{cluster_id}/promote:
+    post:
+      tags: [Backlog]
+      summary: Promote cluster to COP candidate
+      description: |
+        Convert a cluster into a COP candidate for verification and publishing workflow.
+        Requires facilitator role.
+      operationId: promoteCluster
+      parameters:
+        - name: cluster_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [primary_signal_ids]
+              properties:
+                primary_signal_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: objectid
+                  description: Key signals supporting this candidate
+                  minItems: 1
+                initial_risk_tier:
+                  $ref: "#/components/schemas/RiskTier"
+                  default: "routine"
+                notes:
+                  type: string
+                  description: Initial facilitator notes
+      responses:
+        "201":
+          description: Candidate created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopCandidateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/AlreadyExists"
+
+  # ============================================================================
+  # COP CANDIDATES
+  # ============================================================================
+
+  /candidates:
+    get:
+      tags: [COP Candidates]
+      summary: List COP candidates
+      description: |
+        Get list of COP candidates with filtering by readiness state and risk tier.
+        Shows readiness indicators and recommended next actions.
+      operationId: listCandidates
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: readiness_state
+          in: query
+          schema:
+            $ref: "#/components/schemas/ReadinessState"
+          description: Filter by readiness state
+        - name: risk_tier
+          in: query
+          schema:
+            $ref: "#/components/schemas/RiskTier"
+          description: Filter by risk tier
+        - name: has_conflicts
+          in: query
+          schema:
+            type: boolean
+          description: Filter candidates with unresolved conflicts
+      responses:
+        "200":
+          description: List of COP candidates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CopCandidate"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /candidates/{id}:
+    get:
+      tags: [COP Candidates]
+      summary: Get candidate details
+      description: |
+        Retrieve full candidate details including evidence pack, verification records,
+        missing fields analysis, and recommended actions.
+      operationId: getCandidate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      responses:
+        "200":
+          description: Candidate details with evidence pack
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopCandidateDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [COP Candidates]
+      summary: Update candidate
+      description: |
+        Update candidate fields, risk tier, or readiness state.
+        Requires facilitator role. Changes are logged to audit trail.
+      operationId: updateCandidate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fields:
+                  $ref: "#/components/schemas/CopFields"
+                readiness_state:
+                  $ref: "#/components/schemas/ReadinessState"
+                risk_tier:
+                  $ref: "#/components/schemas/RiskTier"
+                risk_tier_justification:
+                  type: string
+                  description: Required if changing risk_tier
+                draft_wording:
+                  $ref: "#/components/schemas/DraftWording"
+                notes:
+                  type: string
+                  description: Facilitator notes for this update
+      responses:
+        "200":
+          description: Candidate updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopCandidateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+    delete:
+      tags: [COP Candidates]
+      summary: Archive or defer candidate
+      description: |
+        Remove candidate from active workflow (archive or defer).
+        Requires facilitator role. Action is logged to audit trail.
+      operationId: archiveCandidate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+        - name: reason
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Reason for archiving
+      responses:
+        "204":
+          description: Candidate archived successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /candidates/{id}/verify:
+    post:
+      tags: [COP Candidates]
+      summary: Record verification action
+      description: |
+        Add a verification record to a candidate.
+        Requires verifier or facilitator role.
+      operationId: verifyCandidate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [verification_method, confidence_level]
+              properties:
+                verification_method:
+                  $ref: "#/components/schemas/VerificationMethod"
+                verification_notes:
+                  type: string
+                  description: Explanation of verification process
+                  minLength: 20
+                confidence_level:
+                  $ref: "#/components/schemas/ConfidenceLevel"
+                external_sources:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ExternalSource"
+                  description: External sources used for verification
+      responses:
+        "200":
+          description: Verification recorded successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopCandidateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /candidates/{id}/merge:
+    post:
+      tags: [COP Candidates]
+      summary: Merge duplicate candidates
+      description: |
+        Merge this candidate into another (canonical) candidate.
+        Requires facilitator role. Action is logged to audit trail.
+      operationId: mergeCandidates
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: Source candidate to merge (will be archived)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_candidate_id, justification]
+              properties:
+                target_candidate_id:
+                  type: string
+                  format: objectid
+                  description: Target candidate to merge into
+                justification:
+                  type: string
+                  description: Reason for merge
+                  minLength: 20
+      responses:
+        "200":
+          description: Candidates merged successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopCandidateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  # ============================================================================
+  # COP PUBLISHING
+  # ============================================================================
+
+  /cop/draft:
+    get:
+      tags: [COP Publishing]
+      summary: Get current COP draft
+      description: |
+        Assemble current COP draft from ready candidates.
+        Groups candidates into sections: verified, in_review, disproven, gaps.
+        Shows publish gate status and any blocking issues.
+      operationId: getCopDraft
+      responses:
+        "200":
+          description: Current COP draft
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopDraftResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /cop/draft/{line_id}:
+    patch:
+      tags: [COP Publishing]
+      summary: Edit draft line item
+      description: |
+        Edit headline or body text for a specific line item in the draft.
+        Requires facilitator role.
+      operationId: editDraftLine
+      parameters:
+        - name: line_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: Candidate ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                headline:
+                  type: string
+                  description: Updated headline text
+                body:
+                  type: string
+                  description: Updated body text
+      responses:
+        "200":
+          description: Draft line updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopCandidateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /cop/publish:
+    post:
+      tags: [COP Publishing]
+      summary: Publish COP update
+      description: |
+        Publish current COP draft to Slack as a new versioned COP update.
+        Requires facilitator role and publish gate approval.
+
+        Publish gates enforced:
+        - High-stakes unverified items require justification override
+        - Unresolved conflicts require resolution or override
+        - Missing evidence requires acknowledgment
+
+        For high-stakes overrides, may require second approver (two-person rule).
+      operationId: publishCop
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slack_channel_id]
+              properties:
+                slack_channel_id:
+                  type: string
+                  description: Slack channel to post COP update
+                overrides:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/PublishOverride"
+                  description: Justifications for publish gate overrides
+                next_update_time:
+                  type: string
+                  format: date-time
+                  description: Expected time of next COP update
+      responses:
+        "201":
+          description: COP update published successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopUpdateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /cop/updates:
+    get:
+      tags: [COP Publishing]
+      summary: List published COP updates
+      description: List published COP updates in reverse chronological order
+      operationId: listCopUpdates
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: slack_channel_id
+          in: query
+          schema:
+            type: string
+          description: Filter by Slack channel
+        - name: start_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter updates published after this time
+        - name: end_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter updates published before this time
+      responses:
+        "200":
+          description: List of COP updates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CopUpdate"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /cop/updates/{version}:
+    get:
+      tags: [COP Publishing]
+      summary: Get specific COP version
+      description: |
+        Retrieve a specific COP update by version number with full evidence pack
+        and candidate snapshots for audit trail.
+      operationId: getCopVersion
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: COP version number
+      responses:
+        "200":
+          description: COP update details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopUpdateDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ============================================================================
+  # SEARCH
+  # ============================================================================
+
+  /search:
+    get:
+      tags: [Search]
+      summary: Search signals, clusters, and candidates
+      description: |
+        Full-text search across signals, clusters, and candidates.
+        Supports keyword search, time range filtering, and channel filtering.
+        Requires facilitator role.
+      operationId: search
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 3
+          description: Search query (keyword search)
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [signal, cluster, candidate]
+          description: Filter by entity type
+        - name: channel
+          in: query
+          schema:
+            type: string
+          description: Filter by Slack channel ID (signals only)
+        - name: start_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter results after this time
+        - name: end_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter results before this time
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SearchResult"
+                  meta:
+                    allOf:
+                      - $ref: "#/components/schemas/PaginationMeta"
+                      - type: object
+                        properties:
+                          total_matches:
+                            type: integer
+                            description: Total number of matching results
+                          search_time_ms:
+                            type: integer
+                            description: Search execution time in milliseconds
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ============================================================================
+  # METRICS
+  # ============================================================================
+
+  /metrics:
+    get:
+      tags: [Metrics]
+      summary: Get operational metrics summary
+      description: |
+        Retrieve operational metrics for monitoring workflow health.
+        Includes signal ingestion rates, candidate pipeline status,
+        COP update frequency, and provenance coverage.
+      operationId: getMetrics
+      parameters:
+        - name: start_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Metrics calculation start time (default: 24 hours ago)
+        - name: end_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Metrics calculation end time (default: now)
+      responses:
+        "200":
+          description: Operational metrics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /metrics/export:
+    get:
+      tags: [Metrics]
+      summary: Export metrics data
+      description: |
+        Export detailed metrics data as JSON or CSV for external analysis.
+        Requires facilitator role.
+      operationId: exportMetrics
+      parameters:
+        - name: start_time
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: end_time
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+          description: Export format
+      responses:
+        "200":
+          description: Metrics export file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsExportResponse"
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ============================================================================
+  # AUDIT LOG
+  # ============================================================================
+
+  /audit:
+    get:
+      tags: [Audit]
+      summary: List audit log entries
+      description: |
+        Retrieve audit log entries for compliance and abuse detection.
+        Requires facilitator or workspace_admin role.
+      operationId: listAuditLog
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: actor
+          in: query
+          schema:
+            type: string
+            format: objectid
+          description: Filter by actor user ID
+        - name: action_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/AuditActionType"
+          description: Filter by action type
+        - name: target_type
+          in: query
+          schema:
+            type: string
+            enum: [signal, cluster, cop_candidate, cop_update, user]
+          description: Filter by target entity type
+        - name: start_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter entries after this time
+        - name: end_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter entries before this time
+        - name: is_flagged
+          in: query
+          schema:
+            type: boolean
+          description: Filter flagged actions (abuse detection)
+      responses:
+        "200":
+          description: List of audit log entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditLogEntry"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+# ==============================================================================
+# COMPONENTS
+# ==============================================================================
+
+components:
+  securitySchemes:
+    slackOAuth:
+      type: oauth2
+      description: Slack OAuth 2.0 authentication
+      flows:
+        authorizationCode:
+          authorizationUrl: https://slack.com/oauth/v2/authorize
+          tokenUrl: https://slack.com/api/oauth.v2.access
+          scopes:
+            users:read: Read user profile information
+            channels:read: Read channel information
+            chat:write: Post messages to channels
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: Page number for pagination
+
+    PerPageParam:
+      name: per_page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: Items per page
+
+  schemas:
+    # ========================================================================
+    # USER SCHEMAS
+    # ========================================================================
+
+    UserRole:
+      type: string
+      enum:
+        - general_participant
+        - facilitator
+        - verifier
+        - workspace_admin
+      description: |
+        User role:
+        - general_participant: Read-only access to published COPs
+        - facilitator: Full backlog and candidate management
+        - verifier: Verification actions on candidates
+        - workspace_admin: User and role management
+
+    User:
+      type: object
+      required:
+        - id
+        - slack_user_id
+        - slack_team_id
+        - roles
+        - is_suspended
+        - created_at
+      properties:
+        id:
+          type: string
+          format: objectid
+        slack_user_id:
+          type: string
+        slack_team_id:
+          type: string
+        slack_email:
+          type: string
+          format: email
+        slack_display_name:
+          type: string
+        slack_real_name:
+          type: string
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserRole"
+        is_suspended:
+          type: boolean
+        activity_stats:
+          type: object
+          properties:
+            last_action_at:
+              type: string
+              format: date-time
+            total_actions:
+              type: integer
+            high_stakes_overrides_count:
+              type: integer
+            publish_count:
+              type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    UserResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/User"
+
+    # ========================================================================
+    # CLUSTER SCHEMAS
+    # ========================================================================
+
+    TopicType:
+      type: string
+      enum:
+        - incident
+        - need
+        - resource_offer
+        - infrastructure
+        - rumor
+        - general
+
+    Cluster:
+      type: object
+      required:
+        - id
+        - topic_type
+        - signal_count
+        - first_signal_at
+        - last_signal_at
+        - priority_score
+        - created_at
+      properties:
+        id:
+          type: string
+          format: objectid
+        name:
+          type: string
+        topic_type:
+          $ref: "#/components/schemas/TopicType"
+        keywords:
+          type: array
+          items:
+            type: string
+        signal_count:
+          type: integer
+        first_signal_at:
+          type: string
+          format: date-time
+        last_signal_at:
+          type: string
+          format: date-time
+        has_conflicts:
+          type: boolean
+        urgency_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        impact_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        risk_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        priority_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Composite score for backlog sorting
+        ai_summary:
+          type: string
+        promoted_to_candidate_id:
+          type: string
+          format: objectid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Signal:
+      type: object
+      required:
+        - id
+        - slack_channel_id
+        - slack_message_ts
+        - slack_user_id
+        - text
+        - posted_at
+        - permalink
+      properties:
+        id:
+          type: string
+          format: objectid
+        slack_channel_id:
+          type: string
+        slack_message_ts:
+          type: string
+        slack_user_id:
+          type: string
+        text:
+          type: string
+        posted_at:
+          type: string
+          format: date-time
+        permalink:
+          type: string
+          format: uri
+        reactions:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              count:
+                type: integer
+              users:
+                type: array
+                items:
+                  type: string
+
+    ClusterDetailResponse:
+      type: object
+      properties:
+        data:
+          allOf:
+            - $ref: "#/components/schemas/Cluster"
+            - type: object
+              properties:
+                signals:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Signal"
+                conflict_details:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      field:
+                        type: string
+                      values:
+                        type: array
+                        items:
+                          type: string
+                      signal_ids:
+                        type: array
+                        items:
+                          type: string
+                          format: objectid
+                      severity:
+                        type: string
+                        enum: [minor, moderate, critical]
+
+    # ========================================================================
+    # COP CANDIDATE SCHEMAS
+    # ========================================================================
+
+    ReadinessState:
+      type: string
+      enum:
+        - verified
+        - in_review
+        - blocked
+      description: |
+        Readiness state:
+        - verified: Fully verified and ready to publish
+        - in_review: Unconfirmed, can publish with caveats
+        - blocked: Not ready to publish (missing fields, unresolved conflicts)
+
+    RiskTier:
+      type: string
+      enum:
+        - routine
+        - elevated
+        - high_stakes
+      description: |
+        Risk tier:
+        - routine: Low-risk information
+        - elevated: Moderate-risk requiring verification
+        - high_stakes: High-risk requiring authoritative verification
+
+    VerificationMethod:
+      type: string
+      enum:
+        - firsthand
+        - authoritative_source
+        - cross_reference
+        - other
+
+    ConfidenceLevel:
+      type: string
+      enum:
+        - high
+        - medium
+        - low
+
+    CopFields:
+      type: object
+      required:
+        - what
+        - where
+        - when
+        - so_what
+      properties:
+        what:
+          type: string
+          description: Scoped claim/situation statement
+        where:
+          type: string
+          description: Explicit location (may be approximate)
+        when:
+          type: object
+          required:
+            - timestamp
+            - timezone
+          properties:
+            timestamp:
+              type: string
+              format: date-time
+            timezone:
+              type: string
+              description: IANA timezone (e.g., "America/New_York")
+            is_approximate:
+              type: boolean
+            description:
+              type: string
+        who:
+          type: string
+          description: Source/actor/affected population
+        so_what:
+          type: string
+          description: Operational relevance/impact
+
+    ExternalSource:
+      type: object
+      required:
+        - url
+        - title
+        - source_type
+      properties:
+        url:
+          type: string
+          format: uri
+        title:
+          type: string
+        source_type:
+          type: string
+          enum:
+            - official_source
+            - news
+            - social_media
+            - other
+        accessed_at:
+          type: string
+          format: date-time
+        credibility_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+
+    Evidence:
+      type: object
+      properties:
+        slack_permalinks:
+          type: array
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+                format: uri
+              signal_id:
+                type: string
+                format: objectid
+              description:
+                type: string
+        external_sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalSource"
+
+    Verification:
+      type: object
+      required:
+        - verified_by
+        - verified_at
+        - verification_method
+        - confidence_level
+      properties:
+        verified_by:
+          type: string
+          format: objectid
+        verified_at:
+          type: string
+          format: date-time
+        verification_method:
+          $ref: "#/components/schemas/VerificationMethod"
+        verification_notes:
+          type: string
+        confidence_level:
+          $ref: "#/components/schemas/ConfidenceLevel"
+
+    DraftWording:
+      type: object
+      properties:
+        headline:
+          type: string
+        body:
+          type: string
+        hedging_applied:
+          type: boolean
+        recheck_time:
+          type: string
+          format: date-time
+        next_verification_step:
+          type: string
+
+    RecommendedAction:
+      type: object
+      properties:
+        action_type:
+          type: string
+          enum:
+            - request_clarification
+            - assign_verification
+            - merge_duplicate
+            - resolve_conflict
+            - publish_as_verified
+            - publish_in_review
+        reason:
+          type: string
+        alternatives:
+          type: array
+          items:
+            type: object
+            properties:
+              action_type:
+                type: string
+              reason:
+                type: string
+
+    CopCandidate:
+      type: object
+      required:
+        - id
+        - cluster_id
+        - readiness_state
+        - risk_tier
+        - fields
+        - created_at
+      properties:
+        id:
+          type: string
+          format: objectid
+        cluster_id:
+          type: string
+          format: objectid
+        readiness_state:
+          $ref: "#/components/schemas/ReadinessState"
+        readiness_updated_at:
+          type: string
+          format: date-time
+        risk_tier:
+          $ref: "#/components/schemas/RiskTier"
+        fields:
+          $ref: "#/components/schemas/CopFields"
+        missing_fields:
+          type: array
+          items:
+            type: string
+          description: Field names that are missing or weak
+        recommended_action:
+          $ref: "#/components/schemas/RecommendedAction"
+        draft_wording:
+          $ref: "#/components/schemas/DraftWording"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CopCandidateDetailResponse:
+      type: object
+      properties:
+        data:
+          allOf:
+            - $ref: "#/components/schemas/CopCandidate"
+            - type: object
+              properties:
+                primary_signal_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: objectid
+                evidence:
+                  $ref: "#/components/schemas/Evidence"
+                verifications:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Verification"
+                conflicts:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      conflict_with_candidate_id:
+                        type: string
+                        format: objectid
+                      conflict_field:
+                        type: string
+                      description:
+                        type: string
+                      resolved:
+                        type: boolean
+                      resolution_notes:
+                        type: string
+                blocking_issues:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      issue_type:
+                        type: string
+                        enum:
+                          - missing_field
+                          - conflict
+                          - verification_required
+                      description:
+                        type: string
+                      severity:
+                        type: string
+                        enum:
+                          - blocks_publishing
+                          - requires_caveat
+                          - advisory
+                facilitator_notes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      author_id:
+                        type: string
+                        format: objectid
+                      created_at:
+                        type: string
+                        format: date-time
+                      note:
+                        type: string
+
+    CopCandidateResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/CopCandidate"
+
+    # ========================================================================
+    # COP UPDATE SCHEMAS
+    # ========================================================================
+
+    PublishOverride:
+      type: object
+      required:
+        - candidate_id
+        - override_type
+        - justification
+      properties:
+        candidate_id:
+          type: string
+          format: objectid
+        override_type:
+          type: string
+          enum:
+            - high_stakes_unverified
+            - conflict_unresolved
+            - missing_evidence
+        justification:
+          type: string
+          minLength: 50
+
+    CopUpdate:
+      type: object
+      required:
+        - id
+        - version_number
+        - published_at
+        - published_by
+        - slack_channel_id
+      properties:
+        id:
+          type: string
+          format: objectid
+        version_number:
+          type: integer
+        previous_version_id:
+          type: string
+          format: objectid
+        published_at:
+          type: string
+          format: date-time
+        published_by:
+          type: string
+          format: objectid
+        slack_channel_id:
+          type: string
+        slack_message_ts:
+          type: string
+        slack_permalink:
+          type: string
+          format: uri
+        metrics:
+          type: object
+          properties:
+            total_verified_items:
+              type: integer
+            total_in_review_items:
+              type: integer
+            total_disproven_items:
+              type: integer
+            total_gaps:
+              type: integer
+            provenance_coverage_pct:
+              type: number
+            time_since_last_update_minutes:
+              type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    CopDraftResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            sections:
+              type: object
+              properties:
+                verified:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/CopCandidate"
+                in_review:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/CopCandidate"
+                disproven:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      candidate_id:
+                        type: string
+                        format: objectid
+                      claim:
+                        type: string
+                      correction:
+                        type: string
+                gaps:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      question:
+                        type: string
+                      context:
+                        type: string
+                      requested_info:
+                        type: string
+            publish_gates:
+              type: object
+              properties:
+                can_publish:
+                  type: boolean
+                blocking_issues:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      issue_type:
+                        type: string
+                      description:
+                        type: string
+                      requires_override:
+                        type: boolean
+
+    CopUpdateDetailResponse:
+      type: object
+      properties:
+        data:
+          allOf:
+            - $ref: "#/components/schemas/CopUpdate"
+            - type: object
+              properties:
+                content:
+                  type: object
+                  properties:
+                    header:
+                      type: object
+                      properties:
+                        title:
+                          type: string
+                        timestamp:
+                          type: string
+                          format: date-time
+                        timezone:
+                          type: string
+                        disclaimer:
+                          type: string
+                    sections:
+                      type: object
+                      description: COP content sections
+                    footer:
+                      type: object
+                      properties:
+                        change_summary:
+                          type: string
+                        next_update_time:
+                          type: string
+                          format: date-time
+                        contact_info:
+                          type: string
+                candidates_snapshot:
+                  type: array
+                  items:
+                    type: object
+                  description: Immutable snapshot of candidates at publish time
+                overrides:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/PublishOverride"
+
+    CopUpdateResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/CopUpdate"
+
+    # ========================================================================
+    # SEARCH SCHEMAS
+    # ========================================================================
+
+    SearchResult:
+      type: object
+      required:
+        - type
+        - id
+        - score
+      properties:
+        type:
+          type: string
+          enum: [signal, cluster, candidate]
+        id:
+          type: string
+          format: objectid
+        score:
+          type: number
+          format: float
+          description: Search relevance score
+        highlight:
+          type: object
+          description: Highlighted text snippets matching query
+          properties:
+            text:
+              type: string
+            fields:
+              type: object
+        entity:
+          oneOf:
+            - $ref: "#/components/schemas/Signal"
+            - $ref: "#/components/schemas/Cluster"
+            - $ref: "#/components/schemas/CopCandidate"
+
+    # ========================================================================
+    # METRICS SCHEMAS
+    # ========================================================================
+
+    MetricsResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            time_range:
+              type: object
+              properties:
+                start_time:
+                  type: string
+                  format: date-time
+                end_time:
+                  type: string
+                  format: date-time
+            signal_ingestion:
+              type: object
+              properties:
+                total_signals:
+                  type: integer
+                signals_per_hour:
+                  type: number
+                unique_channels:
+                  type: integer
+                unique_users:
+                  type: integer
+            cluster_pipeline:
+              type: object
+              properties:
+                total_clusters:
+                  type: integer
+                backlog_count:
+                  type: integer
+                promoted_count:
+                  type: integer
+                avg_priority_score:
+                  type: number
+                clusters_with_conflicts:
+                  type: integer
+            candidate_pipeline:
+              type: object
+              properties:
+                total_candidates:
+                  type: integer
+                verified_count:
+                  type: integer
+                in_review_count:
+                  type: integer
+                blocked_count:
+                  type: integer
+                by_risk_tier:
+                  type: object
+                  properties:
+                    routine:
+                      type: integer
+                    elevated:
+                      type: integer
+                    high_stakes:
+                      type: integer
+            cop_updates:
+              type: object
+              properties:
+                total_updates:
+                  type: integer
+                avg_time_between_updates_minutes:
+                  type: number
+                avg_provenance_coverage_pct:
+                  type: number
+            verification_stats:
+              type: object
+              properties:
+                total_verifications:
+                  type: integer
+                by_method:
+                  type: object
+                by_confidence_level:
+                  type: object
+
+    MetricsExportResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            export_url:
+              type: string
+              format: uri
+              description: Temporary download URL for export file
+            expires_at:
+              type: string
+              format: date-time
+            format:
+              type: string
+              enum: [json, csv]
+            size_bytes:
+              type: integer
+
+    # ========================================================================
+    # AUDIT LOG SCHEMAS
+    # ========================================================================
+
+    AuditActionType:
+      type: string
+      enum:
+        - signal.ingest
+        - cluster.create
+        - cluster.update
+        - cop_candidate.promote
+        - cop_candidate.update_state
+        - cop_candidate.update_risk_tier
+        - cop_candidate.verify
+        - cop_candidate.merge
+        - cop_update.publish
+        - cop_update.override
+        - user.role_change
+        - user.suspend
+        - user.reinstate
+        - access.denied
+
+    AuditLogEntry:
+      type: object
+      required:
+        - id
+        - timestamp
+        - actor_id
+        - action_type
+        - target_entity_type
+        - target_entity_id
+      properties:
+        id:
+          type: string
+          format: objectid
+        timestamp:
+          type: string
+          format: date-time
+        actor_id:
+          type: string
+          format: objectid
+        actor_role:
+          type: string
+        actor_ip:
+          type: string
+        action_type:
+          $ref: "#/components/schemas/AuditActionType"
+        target_entity_type:
+          type: string
+          enum: [signal, cluster, cop_candidate, cop_update, user]
+        target_entity_id:
+          type: string
+          format: objectid
+        changes:
+          type: object
+          properties:
+            before:
+              type: object
+            after:
+              type: object
+        justification:
+          type: string
+        is_flagged:
+          type: boolean
+        flag_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    # ========================================================================
+    # PAGINATION & ERROR SCHEMAS
+    # ========================================================================
+
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+        per_page:
+          type: integer
+        total:
+          type: integer
+          description: Total number of items
+        total_pages:
+          type: integer
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+              code:
+                type: string
+        request_id:
+          type: string
+          description: Request ID for tracking and support
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters or malformed request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Invalid input data
+              details:
+                - field: email
+                  message: Invalid email format
+                  code: INVALID_FORMAT
+              request_id: req_abc123
+
+    Unauthorized:
+      description: No valid authentication credentials provided
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Authentication required
+              request_id: req_abc123
+
+    Forbidden:
+      description: Authenticated but insufficient permissions
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: FORBIDDEN
+              message: Insufficient permissions. Requires facilitator role.
+              request_id: req_abc123
+
+    NotFound:
+      description: Requested resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: NOT_FOUND
+              message: Resource not found
+              request_id: req_abc123
+
+    Conflict:
+      description: Request conflicts with current state
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: CONFLICT
+              message: Cannot merge candidate with itself
+              request_id: req_abc123
+
+    AlreadyExists:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: ALREADY_EXISTS
+              message: Cluster already promoted to candidate
+              request_id: req_abc123
+
+    UnprocessableEntity:
+      description: Request violates business rules
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: UNPROCESSABLE
+              message: Cannot publish high-stakes unverified candidate without override justification
+              details:
+                - field: overrides
+                  message: Missing override for candidate_id 123
+                  code: MISSING_OVERRIDE
+              request_id: req_abc123
+
+    RateLimitExceeded:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: RATE_LIMIT_EXCEEDED
+              message: Too many COP publish requests. Maximum 1 per 5 minutes.
+              request_id: req_abc123
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until rate limit resets
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: INTERNAL_ERROR
+              message: An unexpected error occurred
+              request_id: req_abc123
