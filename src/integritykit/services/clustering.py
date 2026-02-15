@@ -11,8 +11,24 @@ from integritykit.models.signal import Signal
 from integritykit.services.database import ClusterRepository, SignalRepository
 from integritykit.services.embedding import EmbeddingService
 from integritykit.services.llm import LLMService
+from integritykit.utils.ai_metadata import (
+    AIOperationType,
+    create_ai_metadata,
+    merge_ai_metadata,
+)
 
 logger = structlog.get_logger(__name__)
+
+# Import DuplicateDetectionService and ConflictDetectionService only when needed to avoid circular dependency
+try:
+    from integritykit.services.duplicate_detection import DuplicateDetectionService
+except ImportError:
+    DuplicateDetectionService = None  # type: ignore
+
+try:
+    from integritykit.services.conflict_detection import ConflictDetectionService
+except ImportError:
+    ConflictDetectionService = None  # type: ignore
 
 
 class ClusteringService:
@@ -24,8 +40,12 @@ class ClusteringService:
         cluster_repository: ClusterRepository,
         embedding_service: EmbeddingService,
         llm_service: LLMService,
+        duplicate_detection_service: Optional["DuplicateDetectionService"] = None,
+        conflict_detection_service: Optional["ConflictDetectionService"] = None,
         similarity_threshold: float = 0.75,
         max_clusters_to_compare: int = 10,
+        enable_duplicate_detection: bool = True,
+        enable_conflict_detection: bool = True,
     ):
         """Initialize clustering service.
 
@@ -34,15 +54,23 @@ class ClusteringService:
             cluster_repository: Repository for cluster operations
             embedding_service: Service for embedding generation and similarity search
             llm_service: Service for LLM-powered classification
+            duplicate_detection_service: Optional service for duplicate detection
+            conflict_detection_service: Optional service for conflict detection
             similarity_threshold: Minimum similarity score for cluster consideration
             max_clusters_to_compare: Maximum number of clusters to compare via LLM
+            enable_duplicate_detection: Whether to run duplicate detection on cluster assignment
+            enable_conflict_detection: Whether to run conflict detection on cluster assignment
         """
         self.signal_repo = signal_repository
         self.cluster_repo = cluster_repository
         self.embedding_service = embedding_service
         self.llm_service = llm_service
+        self.duplicate_detection_service = duplicate_detection_service
+        self.conflict_detection_service = conflict_detection_service
         self.similarity_threshold = similarity_threshold
         self.max_clusters_to_compare = max_clusters_to_compare
+        self.enable_duplicate_detection = enable_duplicate_detection
+        self.enable_conflict_detection = enable_conflict_detection
 
     async def process_new_signal(self, signal: Signal) -> Cluster:
         """Process a new signal and assign to cluster.
@@ -257,16 +285,26 @@ class ClusteringService:
 
         cluster = await self.cluster_repo.create(cluster_data)
 
+        # Create AI metadata for cluster creation
+        topic_metadata = create_ai_metadata(
+            model=self.llm_service.model,
+            operation=AIOperationType.TOPIC_GENERATION,
+            seed_signal_id=str(signal.id),
+        )
+
+        summary_metadata = create_ai_metadata(
+            model=self.llm_service.model,
+            operation=AIOperationType.SUMMARY_GENERATION,
+            signal_count=1,
+        )
+
+        # Merge AI metadata from topic and summary generation
+        ai_metadata = merge_ai_metadata(topic_metadata, summary_metadata)
+
         # Update cluster metadata
         await self.cluster_repo.update(
             cluster.id,
-            {
-                "ai_generated_metadata": {
-                    "model": self.llm_service.model,
-                    "generation_timestamp": datetime.utcnow().isoformat(),
-                    "seed_signal_id": str(signal.id),
-                }
-            },
+            {"ai_generated_metadata": ai_metadata},
         )
 
         # Add signal to cluster
@@ -282,11 +320,32 @@ class ClusteringService:
             priority_scores.model_dump(),
         )
 
+        # Update AI metadata to include priority assessment
+        cluster_refreshed = await self.cluster_repo.get_by_id(cluster.id)
+        if cluster_refreshed:
+            priority_metadata = create_ai_metadata(
+                model=self.llm_service.model,
+                operation=AIOperationType.PRIORITY_ASSESSMENT,
+                urgency=priority_scores.urgency,
+                impact=priority_scores.impact,
+                risk=priority_scores.risk,
+                composite_score=priority_scores.composite_score,
+            )
+            updated_metadata = merge_ai_metadata(
+                cluster_refreshed.ai_generated_metadata,
+                priority_metadata,
+            )
+            await self.cluster_repo.update(
+                cluster.id,
+                {"ai_generated_metadata": updated_metadata},
+            )
+
         logger.info(
-            "Created new cluster",
+            "AI-created new cluster",
             cluster_id=str(cluster.id),
             topic=topic,
             signal_id=str(signal.id),
+            ai_generated=True,
         )
 
         # Refresh cluster from DB
@@ -327,6 +386,38 @@ class ClusteringService:
             cluster_id=cluster_id,
         )
 
+        # Check for duplicates within cluster
+        if self.enable_duplicate_detection and self.duplicate_detection_service:
+            try:
+                signal = await self.signal_repo.get_by_id(signal_id)
+                if signal:
+                    duplicate_matches = await self.duplicate_detection_service.detect_duplicates_for_signal(
+                        signal=signal,
+                        cluster_id=cluster_id,
+                    )
+
+                    # Auto-mark high-confidence duplicates
+                    if duplicate_matches:
+                        await self.duplicate_detection_service.auto_mark_duplicates_for_signal(
+                            signal=signal,
+                            duplicate_matches=duplicate_matches,
+                            confidence_threshold="high",
+                        )
+
+                        logger.info(
+                            "AI-detected duplicates for signal",
+                            signal_id=str(signal_id),
+                            duplicate_count=len(duplicate_matches),
+                            ai_generated=True,
+                        )
+            except Exception as e:
+                logger.error(
+                    "Failed to detect duplicates for signal",
+                    signal_id=str(signal_id),
+                    cluster_id=str(cluster_id),
+                    error=str(e),
+                )
+
         # Update cluster summary with new signal
         signals = await self.signal_repo.list_by_cluster(cluster_id)
         summary = await self.llm_service.generate_cluster_summary(
@@ -334,11 +425,26 @@ class ClusteringService:
             topic=cluster.topic,
         )
 
+        # Create AI metadata for summary update
+        summary_metadata = create_ai_metadata(
+            model=self.llm_service.model,
+            operation=AIOperationType.SUMMARY_GENERATION,
+            signal_count=len(signals),
+            updated_signal_id=str(signal_id),
+        )
+
+        # Merge with existing metadata
+        updated_metadata = merge_ai_metadata(
+            cluster.ai_generated_metadata,
+            summary_metadata,
+        )
+
         await self.cluster_repo.update(
             cluster_id,
             {
                 "summary": summary,
                 "updated_at": datetime.utcnow(),
+                "ai_generated_metadata": updated_metadata,
             },
         )
 
@@ -349,11 +455,71 @@ class ClusteringService:
             priority_scores.model_dump(),
         )
 
+        # Detect conflicts with new signal if enabled
+        if self.enable_conflict_detection and self.conflict_detection_service:
+            try:
+                signal = await self.signal_repo.get_by_id(signal_id)
+                if signal:
+                    # Refresh cluster to get latest state
+                    cluster = await self.cluster_repo.get_by_id(cluster_id)
+
+                    new_conflicts = await self.conflict_detection_service.detect_conflicts_for_new_signal(
+                        signal=signal,
+                        cluster=cluster,
+                    )
+
+                    if new_conflicts:
+                        # Get existing conflicts
+                        all_conflicts = cluster.conflicts + new_conflicts
+
+                        # Update cluster with new conflicts
+                        await self.cluster_repo.update(
+                            cluster_id,
+                            {
+                                "conflicts": [c.model_dump() for c in all_conflicts],
+                                "updated_at": datetime.utcnow(),
+                            },
+                        )
+
+                        # Create AI metadata for conflict detection
+                        conflict_metadata = create_ai_metadata(
+                            model=self.llm_service.model,
+                            operation=AIOperationType.CONFLICT_DETECTION,
+                            conflicts_detected=len(new_conflicts),
+                        )
+
+                        # Merge with existing metadata
+                        updated_metadata = merge_ai_metadata(
+                            cluster.ai_generated_metadata,
+                            conflict_metadata,
+                        )
+
+                        await self.cluster_repo.update(
+                            cluster_id,
+                            {"ai_generated_metadata": updated_metadata},
+                        )
+
+                        logger.info(
+                            "AI-detected conflicts for new signal",
+                            signal_id=str(signal_id),
+                            cluster_id=str(cluster_id),
+                            new_conflicts=len(new_conflicts),
+                            ai_generated=True,
+                        )
+            except Exception as e:
+                logger.error(
+                    "Failed to detect conflicts for new signal",
+                    signal_id=str(signal_id),
+                    cluster_id=str(cluster_id),
+                    error=str(e),
+                )
+
         logger.info(
-            "Added signal to cluster",
+            "AI-updated cluster with new signal",
             signal_id=str(signal_id),
             cluster_id=str(cluster_id),
             signal_count=len(signals),
+            ai_generated=True,
         )
 
         # Refresh cluster from DB
@@ -411,9 +577,10 @@ class ClusteringService:
         )
 
         logger.info(
-            "Calculated priority scores",
+            "AI-calculated priority scores",
             cluster_id=str(cluster.id),
             composite_score=priority_scores.composite_score,
+            ai_generated=True,
         )
 
         return priority_scores

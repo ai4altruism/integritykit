@@ -13,9 +13,38 @@ from integritykit.models.signal import PyObjectId
 class ConflictSeverity(str, Enum):
     """Severity level of conflicts between signals."""
 
-    MINOR = "minor"
-    MODERATE = "moderate"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
     CRITICAL = "critical"
+
+
+class ConflictResolutionType(str, Enum):
+    """Type of resolution for a conflict."""
+
+    MERGED = "merged"
+    ONE_CORRECT = "one_correct"
+    BOTH_VALID = "both_valid"
+    DEFERRED = "deferred"
+
+
+class ConflictResolution(BaseModel):
+    """Resolution details for a conflict."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    type: ConflictResolutionType = Field(
+        ...,
+        description="Type of resolution applied",
+    )
+    reasoning: str = Field(
+        ...,
+        description="Explanation for the resolution",
+    )
+    canonical_value: Optional[str] = Field(
+        default=None,
+        description="The canonical value if resolution type is merged or one_correct",
+    )
 
 
 class ConflictRecord(BaseModel):
@@ -23,6 +52,10 @@ class ConflictRecord(BaseModel):
 
     model_config = ConfigDict(use_enum_values=True)
 
+    id: str = Field(
+        ...,
+        description="Unique identifier for this conflict",
+    )
     signal_ids: list[PyObjectId] = Field(
         ...,
         description="Signal IDs involved in the conflict",
@@ -38,6 +71,30 @@ class ConflictRecord(BaseModel):
     description: str = Field(
         ...,
         description="Human-readable description of the conflict",
+    )
+    values: dict[str, str] = Field(
+        default_factory=dict,
+        description="The conflicting values from each signal (signal_id -> value)",
+    )
+    detected_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When the conflict was detected",
+    )
+    resolved: bool = Field(
+        default=False,
+        description="Whether the conflict has been resolved",
+    )
+    resolution: Optional[ConflictResolution] = Field(
+        default=None,
+        description="Resolution details if conflict is resolved",
+    )
+    resolved_by: Optional[str] = Field(
+        default=None,
+        description="User who resolved the conflict",
+    )
+    resolved_at: Optional[datetime] = Field(
+        default=None,
+        description="When the conflict was resolved",
     )
 
 
@@ -197,3 +254,12 @@ class Cluster(BaseModel):
             True if conflicts exist
         """
         return len(self.conflicts) > 0
+
+    @property
+    def has_unresolved_conflicts(self) -> bool:
+        """Check if cluster has any unresolved conflicts.
+
+        Returns:
+            True if unresolved conflicts exist
+        """
+        return any(not conflict.resolved for conflict in self.conflicts)
