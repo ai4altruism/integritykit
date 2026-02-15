@@ -41,6 +41,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
     "mongomock>=4.1.0",
+    "mongomock-motor>=0.0.21",
     "httpx>=0.26.0",
     "ruff>=0.1.0",
     "mypy>=1.8.0",
@@ -62,7 +63,17 @@ packages = ["src/integritykit"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "unit: Unit tests (isolated, fast)",
+    "integration: Integration tests (database, external services)",
+    "slow: Slow-running tests",
+    "requires_mongodb: Tests requiring MongoDB",
+    "requires_chromadb: Tests requiring ChromaDB",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py311"
