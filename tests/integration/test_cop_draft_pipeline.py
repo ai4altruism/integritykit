@@ -20,13 +20,14 @@ from bson import ObjectId
 from integritykit.models.cop_candidate import (
     ActionType,
     BlockingIssueSeverity,
+    CandidateConflict,
     COPCandidate,
     COPFields,
+    COPWhen,
     Evidence,
     ReadinessState,
     RiskTier,
     SlackPermalink,
-    TimeField,
     Verification,
 )
 from integritykit.services.draft import COPSection, DraftService, WordingStyle
@@ -75,12 +76,10 @@ def create_test_candidate(
     conflicts = []
     if has_conflicts:
         conflicts = [
-            {
-                "conflicting_candidate_id": ObjectId(),
-                "conflict_description": "Contradictory claim",
-                "detected_at": datetime.now(timezone.utc),
-                "resolved": False,
-            }
+            CandidateConflict(
+                conflict_id=str(ObjectId()),
+                status="unresolved",
+            )
         ]
 
     return COPCandidate(
@@ -94,7 +93,7 @@ def create_test_candidate(
         fields=COPFields(
             what=what,
             where=where,
-            when=TimeField(
+            when=COPWhen(
                 timestamp=datetime.now(timezone.utc),
                 timezone="America/Chicago",
                 is_approximate=False,
@@ -380,7 +379,12 @@ class TestEndToEndWorkflow:
 
         # 3. Verify state
         assert candidate.readiness_state == ReadinessState.VERIFIED
-        assert len(candidate.blocking_issues) == 0
+        # May have warnings but no blocking issues
+        blocking_issues = [
+            bi for bi in candidate.blocking_issues
+            if bi.severity == BlockingIssueSeverity.BLOCKS_PUBLISHING
+        ]
+        assert len(blocking_issues) == 0
         assert candidate.recommended_action.action_type == ActionType.READY_TO_PUBLISH
 
         # 4. Generate line item

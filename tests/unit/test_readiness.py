@@ -20,13 +20,14 @@ from bson import ObjectId
 from integritykit.models.cop_candidate import (
     ActionType,
     BlockingIssueSeverity,
+    CandidateConflict,
     COPCandidate,
     COPFields,
+    COPWhen,
     Evidence,
     ReadinessState,
     RiskTier,
     SlackPermalink,
-    TimeField,
     Verification,
 )
 from integritykit.services.readiness import (
@@ -54,7 +55,7 @@ def make_candidate(
     default_fields = {
         "what": "Bridge closure on Main Street",
         "where": "123 Main St, Springfield, IL",
-        "when": TimeField(
+        "when": COPWhen(
             timestamp=datetime.now(timezone.utc),
             timezone="America/Chicago",
             is_approximate=False,
@@ -88,12 +89,10 @@ def make_candidate(
     conflicts = []
     if has_conflicts:
         conflicts = [
-            {
-                "conflicting_candidate_id": ObjectId(),
-                "conflict_description": "Contradictory claim about bridge status",
-                "detected_at": datetime.now(timezone.utc),
-                "resolved": False,
-            }
+            CandidateConflict(
+                conflict_id=str(ObjectId()),
+                status="unresolved",
+            )
         ]
 
     return COPCandidate(

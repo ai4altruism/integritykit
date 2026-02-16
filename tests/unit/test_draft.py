@@ -15,12 +15,12 @@ from bson import ObjectId
 from integritykit.models.cop_candidate import (
     COPCandidate,
     COPFields,
+    COPWhen,
     Evidence,
     ExternalSource,
     ReadinessState,
     RiskTier,
     SlackPermalink,
-    TimeField,
     Verification,
 )
 from integritykit.services.draft import (
@@ -99,7 +99,7 @@ def make_candidate(
         fields=COPFields(
             what=what,
             where=where,
-            when=TimeField(
+            when=COPWhen(
                 timestamp=datetime.now(timezone.utc),
                 timezone="America/Chicago",
                 is_approximate=False,
