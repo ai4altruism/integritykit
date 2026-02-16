@@ -1,10 +1,12 @@
 # Aid Arena Integrity Kit
 
-Open-source Slack coordination layer for crisis-response communities that produces provenance-backed Common Operating Picture (COP) updates.
+An open-source coordination layer for crisis response that turns chaotic messages into provenance-backed updates, enabling collective verification, safer organizing, and faster, fairer decisions.
 
 ## Overview
 
-The Aid Arena Integrity Kit is a background processing system that helps crisis coordinators turn fast-moving Slack conversations into structured, citation-backed situational awareness updates. Unlike traditional emergency management tools that require participants to file forms or learn new interfaces, this system operates in ambient mode: general participants continue using Slack normally while a small team of facilitators uses AI-assisted tooling to produce accurate COP updates.
+The Aid Arena Integrity Kit is a human-AI collaboration platform that helps crisis coordinators transform fast-moving Slack conversations into structured, citation-backed situational awareness updates. AI clusters related reports, surfaces corroborating evidence, and drafts publication-ready wording, while humans perform all verification and validation. Every claim links back to its source evidence, creating an auditable chain of trust from raw message to published update.
+
+Unlike traditional emergency management tools that require participants to file forms or learn new interfaces, this system operates in ambient mode: general participants continue using Slack normally while a small team of facilitators uses AI-assisted tooling to produce accurate COP updates. The result is accountability without bureaucracy: full provenance and audit trails without slowing down response.
 
 ### What It Does
 
@@ -25,10 +27,10 @@ The Aid Arena Integrity Kit is a background processing system that helps crisis 
 - Mutual aid networks coordinating disaster response
 
 **Key value proposition:**
-- Reduces information overload: facilitators review curated backlog instead of scanning all channels
-- Increases accuracy: verification workflow and conflict detection catch errors before publication
-- Provides accountability: full provenance chain from raw Slack messages to published updates
-- Preserves human judgment: AI provides suggestions, humans make all publishing decisions
+- **Reduces information overload**: Facilitators review a curated, AI-prioritized backlog instead of scanning all channels
+- **Increases accuracy**: Verification workflow and conflict detection catch errors before publication
+- **Builds trust through transparency**: Every published claim links to source evidence—full provenance from raw Slack message to COP update, with immutable audit logs tracking every action
+- **Keeps humans in control**: AI surfaces evidence and drafts wording; humans perform all verification and validation. No update goes out without explicit human approval
 
 ## Architecture Overview
 
