@@ -303,7 +303,7 @@ class ConflictDetectionService:
                 model=self.llm_service.model,
                 operation=AIOperationType.CONFLICT_DETECTION,
                 confidence=None,  # Conflict detection doesn't provide confidence
-                severity=conflict.severity.value,
+                severity=conflict.severity,
                 field=conflict.field,
             )
 

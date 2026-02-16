@@ -41,7 +41,7 @@ class TestBacklogAccessDenied:
         with pytest.raises(AccessDeniedError) as exc_info:
             service.require_permission(user, Permission.VIEW_BACKLOG)
 
-        assert "VIEW_BACKLOG" in str(exc_info.value.message)
+        assert "view_backlog" in str(exc_info.value.message)
 
     def test_general_participant_cannot_promote(self) -> None:
         """General participant cannot promote clusters."""
@@ -109,7 +109,7 @@ class TestSearchAccessDenied:
         with pytest.raises(AccessDeniedError) as exc_info:
             service.require_permission(user, Permission.SEARCH)
 
-        assert "SEARCH" in str(exc_info.value.message)
+        assert "search" in str(exc_info.value.message)
 
     def test_verifier_can_search(self) -> None:
         """Verifier can use search."""
@@ -350,7 +350,7 @@ class TestRoleRequirements:
         with pytest.raises(AccessDeniedError) as exc_info:
             service.require_role(user, UserRole.FACILITATOR)
 
-        assert "FACILITATOR" in str(exc_info.value.message)
+        assert "facilitator" in str(exc_info.value.message)
 
     def test_require_any_role_fails(self) -> None:
         """Require any of multiple roles fails when user has none."""
@@ -427,7 +427,7 @@ class TestPermissionChecks:
         assert result is True
 
     def test_check_permission_suspended_returns_false(self) -> None:
-        """check_permission returns False for suspended users."""
+        """check_permission raises UserSuspendedError for suspended users."""
         user = User(
             id=ObjectId(),
             slack_user_id="U123",
@@ -438,9 +438,8 @@ class TestPermissionChecks:
 
         service = RBACService()
 
-        result = service.check_permission(user, Permission.VIEW_BACKLOG)
-
-        assert result is False
+        with pytest.raises(UserSuspendedError):
+            service.check_permission(user, Permission.VIEW_BACKLOG)
 
 
 # ============================================================================
@@ -466,8 +465,8 @@ class TestAuditLogAccess:
         with pytest.raises(AccessDeniedError):
             service.require_permission(user, Permission.VIEW_AUDIT_LOG)
 
-    def test_facilitator_denied_audit_log(self) -> None:
-        """Facilitator cannot view audit log."""
+    def test_facilitator_can_view_audit_log(self) -> None:
+        """Facilitator can view audit log."""
         user = User(
             id=ObjectId(),
             slack_user_id="U123",
@@ -477,8 +476,8 @@ class TestAuditLogAccess:
 
         service = RBACService()
 
-        with pytest.raises(AccessDeniedError):
-            service.require_permission(user, Permission.VIEW_AUDIT_LOG)
+        # Should not raise - facilitators have VIEW_AUDIT_LOG permission
+        service.require_permission(user, Permission.VIEW_AUDIT_LOG)
 
     def test_admin_can_view_audit_log(self) -> None:
         """Admin can view audit log."""

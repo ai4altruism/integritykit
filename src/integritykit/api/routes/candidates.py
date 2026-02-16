@@ -567,3 +567,535 @@ async def list_candidates_by_state(
         limit=limit,
         offset=offset,
     )
+
+
+# ============================================================================
+# Risk Tier Classification (FR-COP-RISK-001)
+# ============================================================================
+
+
+class RiskSignalResponse(BaseModel):
+    """Risk signal in API response."""
+
+    signal_type: str
+    keyword_matched: str
+    context: str
+    severity: str
+
+
+class RiskClassificationResponse(BaseModel):
+    """Response model for risk classification."""
+
+    candidate_id: str
+    computed_tier: str
+    final_tier: str
+    signals: list[RiskSignalResponse]
+    has_override: bool
+    override_justification: Optional[str] = None
+    explanation: str
+    classified_at: str
+
+
+class RiskTierOverrideRequest(BaseModel):
+    """Request to override risk tier."""
+
+    new_tier: str = Field(..., description="New risk tier (routine, elevated, high_stakes)")
+    justification: str = Field(
+        ...,
+        min_length=10,
+        description="Required justification for override",
+    )
+
+
+class PublishGateResponse(BaseModel):
+    """Response for publish gate check."""
+
+    allowed: bool
+    requires_override: bool
+    override_reason: Optional[str] = None
+    warnings: list[str]
+
+
+class HighStakesOverrideRequest(BaseModel):
+    """Request to apply high-stakes override."""
+
+    justification: str = Field(
+        ...,
+        min_length=20,
+        description="Detailed justification for publishing unverified high-stakes content",
+    )
+
+
+class HighStakesOverrideResponse(BaseModel):
+    """Response for high-stakes override."""
+
+    candidate_id: str
+    override_type: str
+    unconfirmed_label_applied: bool
+    overridden_at: str
+
+
+@router.get("/{candidate_id}/risk", response_model=RiskClassificationResponse)
+async def get_risk_classification(
+    candidate_id: str,
+    user: CurrentUser,
+    _: None = RequireViewBacklog,
+) -> RiskClassificationResponse:
+    """Get risk classification for a candidate (FR-COP-RISK-001).
+
+    Analyzes candidate content for high-stakes keywords and returns
+    the computed risk tier with detected signals.
+
+    Requires VIEW_BACKLOG permission.
+    """
+    from integritykit.services.risk_classification import RiskClassificationService
+
+    try:
+        obj_id = ObjectId(candidate_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid candidate ID format",
+        )
+
+    candidate_repo = COPCandidateRepository()
+    candidate = await candidate_repo.get_by_id(obj_id)
+
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Candidate not found",
+        )
+
+    risk_service = RiskClassificationService()
+    classification = risk_service.classify_candidate(candidate)
+
+    signals = [
+        RiskSignalResponse(
+            signal_type=s.signal_type.value,
+            keyword_matched=s.keyword_matched,
+            context=s.context,
+            severity=s.severity.value,
+        )
+        for s in classification.signals
+    ]
+
+    return RiskClassificationResponse(
+        candidate_id=classification.candidate_id,
+        computed_tier=classification.computed_tier.value,
+        final_tier=classification.final_tier.value,
+        signals=signals,
+        has_override=classification.override is not None,
+        override_justification=(
+            classification.override.justification if classification.override else None
+        ),
+        explanation=classification.explanation,
+        classified_at=classification.classified_at.isoformat(),
+    )
+
+
+@router.post("/{candidate_id}/risk/override", response_model=RiskClassificationResponse)
+async def override_risk_tier(
+    candidate_id: str,
+    request: RiskTierOverrideRequest,
+    user: CurrentUser,
+    _: None = RequireViewBacklog,
+) -> RiskClassificationResponse:
+    """Override the risk tier for a candidate (FR-COP-RISK-001).
+
+    Allows facilitators to adjust the computed risk tier with
+    a required justification. All overrides are audit logged.
+
+    Requires VIEW_BACKLOG permission.
+    """
+    from integritykit.services.risk_classification import RiskClassificationService
+
+    try:
+        obj_id = ObjectId(candidate_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid candidate ID format",
+        )
+
+    # Validate tier value
+    valid_tiers = ["routine", "elevated", "high_stakes"]
+    if request.new_tier not in valid_tiers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid risk tier. Must be one of: {', '.join(valid_tiers)}",
+        )
+
+    candidate_repo = COPCandidateRepository()
+    candidate = await candidate_repo.get_by_id(obj_id)
+
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Candidate not found",
+        )
+
+    risk_service = RiskClassificationService()
+
+    try:
+        new_tier = RiskTier(request.new_tier)
+        candidate = await risk_service.override_risk_tier(
+            candidate=candidate,
+            new_tier=new_tier,
+            user=user,
+            justification=request.justification,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    # Save updated candidate
+    await candidate_repo.update(
+        obj_id,
+        {
+            "risk_tier": candidate.risk_tier.value,
+            "risk_tier_override": candidate.risk_tier_override.model_dump()
+            if candidate.risk_tier_override
+            else None,
+        },
+    )
+
+    # Return updated classification
+    classification = risk_service.classify_candidate(candidate)
+
+    signals = [
+        RiskSignalResponse(
+            signal_type=s.signal_type.value,
+            keyword_matched=s.keyword_matched,
+            context=s.context,
+            severity=s.severity.value,
+        )
+        for s in classification.signals
+    ]
+
+    return RiskClassificationResponse(
+        candidate_id=classification.candidate_id,
+        computed_tier=classification.computed_tier.value,
+        final_tier=classification.final_tier.value,
+        signals=signals,
+        has_override=True,
+        override_justification=request.justification,
+        explanation=classification.explanation,
+        classified_at=classification.classified_at.isoformat(),
+    )
+
+
+# ============================================================================
+# Publish Gates (FR-COP-GATE-001)
+# ============================================================================
+
+
+@router.get("/{candidate_id}/publish-gate", response_model=PublishGateResponse)
+async def check_publish_gate(
+    candidate_id: str,
+    user: CurrentUser,
+    _: None = RequireViewBacklog,
+) -> PublishGateResponse:
+    """Check if a candidate passes publish gates (FR-COP-GATE-001).
+
+    High-stakes candidates require VERIFIED status or explicit override.
+
+    Requires VIEW_BACKLOG permission.
+    """
+    from integritykit.services.risk_classification import (
+        PublishGateService,
+        RiskClassificationService,
+    )
+
+    try:
+        obj_id = ObjectId(candidate_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid candidate ID format",
+        )
+
+    candidate_repo = COPCandidateRepository()
+    candidate = await candidate_repo.get_by_id(obj_id)
+
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Candidate not found",
+        )
+
+    # Get classification and check gate
+    risk_service = RiskClassificationService()
+    gate_service = PublishGateService()
+
+    classification = risk_service.classify_candidate(candidate)
+    result = gate_service.check_publish_gate(candidate, classification)
+
+    return PublishGateResponse(
+        allowed=result.allowed,
+        requires_override=result.requires_override,
+        override_reason=result.override_reason,
+        warnings=result.warnings,
+    )
+
+
+@router.post("/{candidate_id}/publish-gate/override", response_model=HighStakesOverrideResponse)
+async def apply_high_stakes_override(
+    candidate_id: str,
+    request: HighStakesOverrideRequest,
+    user: CurrentUser,
+    _: None = RequireViewBacklog,
+) -> HighStakesOverrideResponse:
+    """Apply override for high-stakes unverified content (FR-COP-GATE-001).
+
+    Allows publishing high-stakes content that isn't verified, with
+    required justification and automatic UNCONFIRMED labeling.
+
+    Requires VIEW_BACKLOG permission.
+    """
+    from integritykit.services.risk_classification import PublishGateService
+
+    try:
+        obj_id = ObjectId(candidate_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid candidate ID format",
+        )
+
+    candidate_repo = COPCandidateRepository()
+    candidate = await candidate_repo.get_by_id(obj_id)
+
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Candidate not found",
+        )
+
+    gate_service = PublishGateService()
+
+    try:
+        override = await gate_service.apply_high_stakes_override(
+            candidate=candidate,
+            user=user,
+            justification=request.justification,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    return HighStakesOverrideResponse(
+        candidate_id=str(override.candidate_id),
+        override_type=override.override_type,
+        unconfirmed_label_applied=override.unconfirmed_label_applied,
+        overridden_at=override.overridden_at.isoformat(),
+    )
+
+
+# ============================================================================
+# Duplicate Merge Endpoints (FR-BACKLOG-003)
+# ============================================================================
+
+
+class DuplicateSuggestionResponse(BaseModel):
+    """Response model for a duplicate candidate suggestion."""
+
+    candidate_id: str
+    headline: str
+    similarity_score: float
+    readiness_state: str
+
+
+class DuplicateSuggestionsResponse(BaseModel):
+    """Response model for duplicate suggestions list."""
+
+    candidate_id: str
+    suggestions: list[DuplicateSuggestionResponse]
+
+
+class MergeRequest(BaseModel):
+    """Request model for merging candidates."""
+
+    secondary_candidate_ids: list[str] = Field(
+        ...,
+        description="IDs of candidates to merge into the primary",
+        min_length=1,
+    )
+    merge_reason: Optional[str] = Field(
+        None,
+        description="Reason for merging these candidates",
+    )
+
+
+class MergeResultResponse(BaseModel):
+    """Response model for merge operation result."""
+
+    primary_candidate_id: str
+    merged_candidate_ids: list[str]
+    signals_added: int
+    message: str
+
+
+@router.get("/{candidate_id}/duplicates", response_model=DuplicateSuggestionsResponse)
+async def get_duplicate_suggestions(
+    candidate_id: str,
+    user: CurrentUser,
+    _: None = RequireViewBacklog,
+    limit: int = Query(5, ge=1, le=20),
+) -> DuplicateSuggestionsResponse:
+    """Get suggested duplicate candidates for a candidate (FR-BACKLOG-003).
+
+    Uses semantic similarity to find candidates that may describe
+    the same incident or event.
+
+    Requires VIEW_BACKLOG permission.
+    """
+    from integritykit.services.candidate_merge import CandidateMergeService
+
+    try:
+        obj_id = ObjectId(candidate_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid candidate ID format",
+        )
+
+    candidate_repo = COPCandidateRepository()
+    candidate = await candidate_repo.get_by_id(obj_id)
+
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Candidate not found",
+        )
+
+    merge_service = CandidateMergeService(candidate_repository=candidate_repo)
+    suggestions = await merge_service.suggest_duplicates(candidate, limit=limit)
+
+    return DuplicateSuggestionsResponse(
+        candidate_id=candidate_id,
+        suggestions=[
+            DuplicateSuggestionResponse(
+                candidate_id=str(s.candidate_id),
+                headline=s.headline,
+                similarity_score=s.similarity_score,
+                readiness_state=s.readiness_state,
+            )
+            for s in suggestions
+        ],
+    )
+
+
+@router.post("/{candidate_id}/merge", response_model=MergeResultResponse)
+async def merge_candidates(
+    candidate_id: str,
+    request: MergeRequest,
+    user: CurrentUser,
+    _: None = RequireViewBacklog,
+) -> MergeResultResponse:
+    """Merge duplicate candidates into a primary candidate (FR-BACKLOG-003).
+
+    The primary candidate absorbs all signals from secondary candidates.
+    Secondary candidates are archived with merge metadata.
+
+    Requires VIEW_BACKLOG permission and MERGE_CANDIDATES permission.
+    """
+    from integritykit.services.candidate_merge import CandidateMergeService
+    from integritykit.services.rbac import AccessDeniedError, RBACService
+    from integritykit.models.user import Permission
+
+    # Check MERGE_CANDIDATES permission
+    rbac = RBACService()
+    if not user.has_permission(Permission.MERGE_CANDIDATES):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission denied: merge_candidates required",
+        )
+
+    try:
+        primary_id = ObjectId(candidate_id)
+        secondary_ids = [ObjectId(sid) for sid in request.secondary_candidate_ids]
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid candidate ID format",
+        )
+
+    candidate_repo = COPCandidateRepository()
+    candidate = await candidate_repo.get_by_id(primary_id)
+
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Primary candidate not found",
+        )
+
+    merge_service = CandidateMergeService(candidate_repository=candidate_repo)
+
+    try:
+        result = await merge_service.merge_candidates(
+            primary_candidate_id=primary_id,
+            secondary_candidate_ids=secondary_ids,
+            user=user,
+            merge_reason=request.merge_reason,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    return MergeResultResponse(
+        primary_candidate_id=str(result.primary_candidate.id),
+        merged_candidate_ids=[str(mid) for mid in result.merged_candidate_ids],
+        signals_added=result.signals_added,
+        message=f"Successfully merged {len(result.merged_candidate_ids)} candidate(s)",
+    )
+
+
+@router.post("/{candidate_id}/unmerge", response_model=CandidateResponse)
+async def unmerge_candidate(
+    candidate_id: str,
+    user: CurrentUser,
+    _: None = RequireViewBacklog,
+) -> CandidateResponse:
+    """Restore a previously merged candidate (FR-BACKLOG-003).
+
+    Restores the candidate to IN_REVIEW state and removes merge metadata.
+
+    Requires VIEW_BACKLOG permission and MERGE_CANDIDATES permission.
+    """
+    from integritykit.services.candidate_merge import CandidateMergeService
+    from integritykit.models.user import Permission
+
+    # Check MERGE_CANDIDATES permission
+    if not user.has_permission(Permission.MERGE_CANDIDATES):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission denied: merge_candidates required",
+        )
+
+    try:
+        obj_id = ObjectId(candidate_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid candidate ID format",
+        )
+
+    candidate_repo = COPCandidateRepository()
+    merge_service = CandidateMergeService(candidate_repository=candidate_repo)
+
+    try:
+        restored = await merge_service.unmerge_candidate(obj_id, user)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    return _candidate_to_response(restored)

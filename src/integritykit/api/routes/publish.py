@@ -623,3 +623,192 @@ async def list_clarification_templates(
         },
         "usage": "Use POST /publish/clarification-template with template_type and topic",
     }
+
+
+# ============================================================================
+# Delta Summary (FR-COPDRAFT-003)
+# ============================================================================
+
+
+class DeltaChangeResponse(BaseModel):
+    """Response model for a single change."""
+
+    change_type: str
+    candidate_id: str
+    headline: str
+    previous_status: Optional[str] = None
+    new_status: Optional[str] = None
+    previous_section: Optional[str] = None
+    new_section: Optional[str] = None
+    description: str = ""
+
+
+class DeltaSummaryResponse(BaseModel):
+    """Response model for delta summary."""
+
+    current_draft_id: str
+    previous_draft_id: Optional[str]
+    generated_at: str
+    changes: list[DeltaChangeResponse]
+    summary_text: str
+    new_items_count: int
+    removed_items_count: int
+    status_changes_count: int
+    has_changes: bool
+    markdown: str
+
+
+@router.get("/drafts/{update_id}/delta", response_model=DeltaSummaryResponse)
+async def get_delta_summary(
+    update_id: str,
+    user: CurrentUser,
+    _: None = RequireViewBacklog,
+    previous_update_id: Optional[str] = Query(
+        default=None,
+        description="ID of previous update to compare against. If not provided, uses the most recent published update.",
+    ),
+) -> DeltaSummaryResponse:
+    """Get delta summary showing what changed since the last COP (FR-COPDRAFT-003).
+
+    Compares the current draft to either:
+    - A specific previous update (if previous_update_id provided)
+    - The most recently published update (default)
+
+    Returns a summary of all changes including new items, removed items,
+    status changes, and content updates.
+
+    Requires VIEW_BACKLOG permission.
+
+    Args:
+        update_id: Current update ID to analyze
+        user: Current authenticated user
+        previous_update_id: Optional specific update to compare against
+
+    Returns:
+        Delta summary with all changes
+    """
+    from integritykit.services.draft import (
+        COPDraft,
+        COPLineItem,
+        COPSection,
+        DeltaSummaryService,
+        WordingStyle,
+    )
+
+    try:
+        current_oid = ObjectId(update_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid update ID format",
+        )
+
+    update_repo = COPUpdateRepository()
+
+    # Get current update
+    current_update = await update_repo.get_by_id(current_oid)
+    if not current_update:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Update not found",
+        )
+
+    if current_update.workspace_id != user.slack_team_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Update belongs to different workspace",
+        )
+
+    # Get previous update
+    previous_update = None
+    if previous_update_id:
+        try:
+            prev_oid = ObjectId(previous_update_id)
+            previous_update = await update_repo.get_by_id(prev_oid)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid previous update ID format",
+            )
+    else:
+        # Get most recent published update
+        previous_update = await update_repo.get_latest_published(
+            workspace_id=user.slack_team_id,
+        )
+        # If current update is published, don't compare to itself
+        if previous_update and previous_update.id == current_update.id:
+            # Get the one before
+            updates = await update_repo.list_by_workspace(
+                workspace_id=user.slack_team_id,
+                status=COPUpdateStatus.PUBLISHED,
+                limit=2,
+            )
+            previous_update = updates[1] if len(updates) > 1 else None
+
+    # Convert COPUpdate to COPDraft for comparison
+    def update_to_draft(update: COPUpdate) -> COPDraft:
+        from datetime import datetime
+
+        verified_items = []
+        in_review_items = []
+        disproven_items = []
+
+        for li in update.line_items:
+            line_item = COPLineItem(
+                candidate_id=str(li.candidate_id),
+                status_label=li.status_label,
+                line_item_text=li.text,
+                citations=li.citations,
+                wording_style=WordingStyle.DIRECT_FACTUAL,
+                section=COPSection(li.section) if li.section in [s.value for s in COPSection] else COPSection.IN_REVIEW,
+            )
+
+            if li.section == "verified":
+                verified_items.append(line_item)
+            elif li.section == "in_review":
+                in_review_items.append(line_item)
+            elif li.section == "disproven":
+                disproven_items.append(line_item)
+
+        return COPDraft(
+            draft_id=str(update.id),
+            workspace_id=update.workspace_id,
+            title=update.title,
+            generated_at=update.created_at,
+            verified_items=verified_items,
+            in_review_items=in_review_items,
+            disproven_items=disproven_items,
+            open_questions=update.open_questions,
+        )
+
+    current_draft = update_to_draft(current_update)
+    previous_draft = update_to_draft(previous_update) if previous_update else None
+
+    # Generate delta summary
+    delta_service = DeltaSummaryService()
+    delta = delta_service.compare_drafts(current_draft, previous_draft)
+
+    return DeltaSummaryResponse(
+        current_draft_id=delta.current_draft_id,
+        previous_draft_id=delta.previous_draft_id,
+        generated_at=delta.generated_at.isoformat(),
+        changes=[
+            DeltaChangeResponse(
+                change_type=c.change_type.value,
+                candidate_id=c.candidate_id,
+                headline=c.headline,
+                previous_status=c.previous_status,
+                new_status=c.new_status,
+                previous_section=c.previous_section,
+                new_section=c.new_section,
+                description=c.description,
+            )
+            for c in delta.changes
+        ],
+        summary_text=delta.summary_text,
+        new_items_count=delta.new_items_count,
+        removed_items_count=delta.removed_items_count,
+        status_changes_count=delta.status_changes_count,
+        has_changes=delta.has_changes,
+        markdown=delta.to_markdown(),
+    )
