@@ -423,13 +423,12 @@ class TestUserSuspension:
             is_suspended=True,
         )
         # Add a suspension record
-        self.rbac.suspend_user.__self__ = user
         from integritykit.models.user import SuspensionRecord
         user.suspension_history.append(
             SuspensionRecord(
                 suspended_at=user.created_at,
                 suspended_by=self.admin_id,
-                suspension_reason="Test",
+                suspension_reason="Test suspension reason",
             )
         )
 

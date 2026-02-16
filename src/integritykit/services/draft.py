@@ -335,22 +335,27 @@ class DraftService:
             citation_text = " ".join(f"[{i+1}]" for i in range(len(citations)))
             line_text = f"{line_text} {citation_text}"
 
-        # Determine next verification step for high-stakes in-review items
+        # Determine next verification step for in-review items (FR-COP-WORDING-002)
+        # Applies to both HIGH_STAKES and ELEVATED risk tiers
         next_step = None
         recheck_time = None
 
-        if (
-            candidate.readiness_state == ReadinessState.IN_REVIEW
-            and candidate.risk_tier == RiskTier.HIGH_STAKES
-        ):
-            if not candidate.fields.who:
-                next_step = "Identify and contact primary source"
-            elif not candidate.verifications:
-                next_step = "Assign verification to available verifier"
-            else:
-                next_step = "Await secondary confirmation"
+        if candidate.readiness_state == ReadinessState.IN_REVIEW:
+            # High-stakes items need urgent recheck and specific next steps
+            if candidate.risk_tier == RiskTier.HIGH_STAKES:
+                next_step = self._determine_high_stakes_next_step(candidate)
+                recheck_time = "Within 30 minutes"
 
-            recheck_time = "Within 1 hour"
+            # Elevated items need near-term recheck
+            elif candidate.risk_tier == RiskTier.ELEVATED:
+                next_step = self._determine_elevated_next_step(candidate)
+                recheck_time = "Within 2 hours"
+
+            # Routine items may optionally have next steps
+            elif candidate.risk_tier == RiskTier.ROUTINE:
+                if not candidate.verifications:
+                    next_step = "Await verification from any available verifier"
+                recheck_time = "Within 4 hours"
 
         logger.info(
             "Generated rule-based line item",
@@ -369,6 +374,72 @@ class DraftService:
             next_verification_step=next_step,
             recheck_time=recheck_time,
         )
+
+    def _determine_high_stakes_next_step(self, candidate: COPCandidate) -> str:
+        """Determine next verification step for high-stakes items.
+
+        Implements FR-COP-WORDING-002 for HIGH_STAKES risk tier.
+
+        Args:
+            candidate: COP candidate
+
+        Returns:
+            Specific next verification step
+        """
+        # Priority 1: Need to identify source
+        if not candidate.fields.who:
+            return "URGENT: Identify and contact primary source for direct confirmation"
+
+        # Priority 2: No verification attempts yet
+        if not candidate.verifications:
+            return "URGENT: Assign verification to available verifier immediately"
+
+        # Priority 3: Has verification attempts - check confidence levels
+        low_confidence = [
+            v for v in candidate.verifications
+            if v.confidence_level.value == "low"
+        ]
+
+        if low_confidence:
+            return "URGENT: Low-confidence verification - seek additional confirmation source"
+
+        # Priority 4: Has verifications but candidate still in review
+        # (may need secondary confirmation or higher confidence)
+        return "URGENT: Seek secondary independent confirmation before publishing"
+
+    def _determine_elevated_next_step(self, candidate: COPCandidate) -> str:
+        """Determine next verification step for elevated risk items.
+
+        Implements FR-COP-WORDING-002 for ELEVATED risk tier.
+
+        Args:
+            candidate: COP candidate
+
+        Returns:
+            Specific next verification step
+        """
+        # Check what's missing
+        if not candidate.fields.who:
+            return "Identify primary source for verification"
+
+        if not candidate.fields.where:
+            return "Confirm exact location details"
+
+        if not candidate.fields.when or not candidate.fields.when.description:
+            return "Confirm timing/recency of information"
+
+        if not candidate.verifications:
+            return "Request verification from available verifier"
+
+        # Has verification attempts - check if we need more confidence
+        low_confidence = [
+            v for v in candidate.verifications
+            if v.confidence_level.value == "low"
+        ]
+        if low_confidence:
+            return "Low-confidence verification - seek additional confirmation"
+
+        return "Seek additional confirmation if possible"
 
     def _apply_wording_guidance(
         self,
@@ -642,3 +713,351 @@ class DraftService:
         candidate.updated_at = datetime.utcnow()
 
         return candidate
+
+
+# ============================================================================
+# Delta Summary (FR-COPDRAFT-003)
+# ============================================================================
+
+
+class ChangeType(str, Enum):
+    """Types of changes between COP drafts."""
+
+    NEW = "new"
+    REMOVED = "removed"
+    STATUS_CHANGE = "status_change"
+    CONTENT_UPDATE = "content_update"
+    SECTION_MOVE = "section_move"
+
+
+@dataclass
+class DeltaChange:
+    """A single change between COP drafts."""
+
+    change_type: ChangeType
+    candidate_id: str
+    headline: str
+    previous_status: Optional[str] = None
+    new_status: Optional[str] = None
+    previous_section: Optional[str] = None
+    new_section: Optional[str] = None
+    description: str = ""
+
+
+@dataclass
+class COPDeltaSummary:
+    """Summary of what changed since the last COP draft (FR-COPDRAFT-003)."""
+
+    current_draft_id: str
+    previous_draft_id: Optional[str]
+    generated_at: datetime
+    changes: list[DeltaChange]
+    summary_text: str
+
+    @property
+    def new_items_count(self) -> int:
+        """Count of newly added items."""
+        return sum(1 for c in self.changes if c.change_type == ChangeType.NEW)
+
+    @property
+    def removed_items_count(self) -> int:
+        """Count of removed items."""
+        return sum(1 for c in self.changes if c.change_type == ChangeType.REMOVED)
+
+    @property
+    def status_changes_count(self) -> int:
+        """Count of status changes."""
+        return sum(1 for c in self.changes if c.change_type == ChangeType.STATUS_CHANGE)
+
+    @property
+    def has_changes(self) -> bool:
+        """Check if there are any changes."""
+        return len(self.changes) > 0
+
+    def to_markdown(self) -> str:
+        """Convert delta summary to Markdown format."""
+        lines = ["## What's Changed Since Last COP", ""]
+
+        if not self.has_changes:
+            lines.append("*No changes since the previous COP draft.*")
+            return "\n".join(lines)
+
+        lines.append(self.summary_text)
+        lines.append("")
+
+        # Group changes by type
+        new_items = [c for c in self.changes if c.change_type == ChangeType.NEW]
+        removed = [c for c in self.changes if c.change_type == ChangeType.REMOVED]
+        status_changes = [c for c in self.changes if c.change_type == ChangeType.STATUS_CHANGE]
+        section_moves = [c for c in self.changes if c.change_type == ChangeType.SECTION_MOVE]
+        content_updates = [c for c in self.changes if c.change_type == ChangeType.CONTENT_UPDATE]
+
+        if new_items:
+            lines.append("### New Items")
+            for c in new_items:
+                lines.append(f"- **{c.headline}** ({c.new_section})")
+            lines.append("")
+
+        if status_changes:
+            lines.append("### Status Changes")
+            for c in status_changes:
+                lines.append(
+                    f"- **{c.headline}**: {c.previous_status} → {c.new_status}"
+                )
+            lines.append("")
+
+        if section_moves:
+            lines.append("### Section Moves")
+            for c in section_moves:
+                lines.append(
+                    f"- **{c.headline}**: moved from {c.previous_section} to {c.new_section}"
+                )
+            lines.append("")
+
+        if removed:
+            lines.append("### Removed Items")
+            for c in removed:
+                lines.append(f"- ~~{c.headline}~~ (was in {c.previous_section})")
+            lines.append("")
+
+        if content_updates:
+            lines.append("### Content Updates")
+            for c in content_updates:
+                lines.append(f"- **{c.headline}**: {c.description}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+
+class DeltaSummaryService:
+    """Service for generating delta summaries between COP drafts.
+
+    Implements FR-COPDRAFT-003: "What changed since last COP" delta summary.
+    """
+
+    def __init__(self, llm_client: Optional[AsyncOpenAI] = None):
+        """Initialize delta summary service.
+
+        Args:
+            llm_client: Optional LLM client for generating natural language summaries
+        """
+        self.llm_client = llm_client
+
+    def compare_drafts(
+        self,
+        current_draft: COPDraft,
+        previous_draft: Optional[COPDraft],
+    ) -> COPDeltaSummary:
+        """Compare two COP drafts and generate a delta summary.
+
+        Args:
+            current_draft: The current/new COP draft
+            previous_draft: The previous COP draft (None for first draft)
+
+        Returns:
+            Delta summary with all changes
+        """
+        changes: list[DeltaChange] = []
+
+        if previous_draft is None:
+            # First draft - all items are new
+            for item in current_draft.verified_items:
+                changes.append(
+                    DeltaChange(
+                        change_type=ChangeType.NEW,
+                        candidate_id=item.candidate_id,
+                        headline=self._extract_headline(item.line_item_text),
+                        new_status="VERIFIED",
+                        new_section=COPSection.VERIFIED.value,
+                        description="New verified item",
+                    )
+                )
+            for item in current_draft.in_review_items:
+                changes.append(
+                    DeltaChange(
+                        change_type=ChangeType.NEW,
+                        candidate_id=item.candidate_id,
+                        headline=self._extract_headline(item.line_item_text),
+                        new_status="IN_REVIEW",
+                        new_section=COPSection.IN_REVIEW.value,
+                        description="New in-review item",
+                    )
+                )
+            for item in current_draft.disproven_items:
+                changes.append(
+                    DeltaChange(
+                        change_type=ChangeType.NEW,
+                        candidate_id=item.candidate_id,
+                        headline=self._extract_headline(item.line_item_text),
+                        new_status="DISPROVEN",
+                        new_section=COPSection.DISPROVEN.value,
+                        description="New disproven item",
+                    )
+                )
+
+            summary_text = self._generate_summary_text(changes, is_first_draft=True)
+
+            return COPDeltaSummary(
+                current_draft_id=current_draft.draft_id,
+                previous_draft_id=None,
+                generated_at=datetime.utcnow(),
+                changes=changes,
+                summary_text=summary_text,
+            )
+
+        # Build maps of items by candidate_id
+        prev_items = self._build_item_map(previous_draft)
+        curr_items = self._build_item_map(current_draft)
+
+        # Find new items (in current but not in previous)
+        for cid, (item, section) in curr_items.items():
+            if cid not in prev_items:
+                changes.append(
+                    DeltaChange(
+                        change_type=ChangeType.NEW,
+                        candidate_id=cid,
+                        headline=self._extract_headline(item.line_item_text),
+                        new_status=item.status_label,
+                        new_section=section,
+                        description="Newly added to draft",
+                    )
+                )
+
+        # Find removed items (in previous but not in current)
+        for cid, (item, section) in prev_items.items():
+            if cid not in curr_items:
+                changes.append(
+                    DeltaChange(
+                        change_type=ChangeType.REMOVED,
+                        candidate_id=cid,
+                        headline=self._extract_headline(item.line_item_text),
+                        previous_status=item.status_label,
+                        previous_section=section,
+                        description="Removed from draft",
+                    )
+                )
+
+        # Find status/section changes
+        for cid, (curr_item, curr_section) in curr_items.items():
+            if cid in prev_items:
+                prev_item, prev_section = prev_items[cid]
+
+                # Check for section move
+                if curr_section != prev_section:
+                    changes.append(
+                        DeltaChange(
+                            change_type=ChangeType.SECTION_MOVE,
+                            candidate_id=cid,
+                            headline=self._extract_headline(curr_item.line_item_text),
+                            previous_status=prev_item.status_label,
+                            new_status=curr_item.status_label,
+                            previous_section=prev_section,
+                            new_section=curr_section,
+                            description=f"Moved from {prev_section} to {curr_section}",
+                        )
+                    )
+                # Check for status change within same section
+                elif curr_item.status_label != prev_item.status_label:
+                    changes.append(
+                        DeltaChange(
+                            change_type=ChangeType.STATUS_CHANGE,
+                            candidate_id=cid,
+                            headline=self._extract_headline(curr_item.line_item_text),
+                            previous_status=prev_item.status_label,
+                            new_status=curr_item.status_label,
+                            description=f"Status changed from {prev_item.status_label} to {curr_item.status_label}",
+                        )
+                    )
+                # Check for content updates
+                elif curr_item.line_item_text != prev_item.line_item_text:
+                    changes.append(
+                        DeltaChange(
+                            change_type=ChangeType.CONTENT_UPDATE,
+                            candidate_id=cid,
+                            headline=self._extract_headline(curr_item.line_item_text),
+                            new_section=curr_section,
+                            description="Content updated",
+                        )
+                    )
+
+        summary_text = self._generate_summary_text(changes)
+
+        return COPDeltaSummary(
+            current_draft_id=current_draft.draft_id,
+            previous_draft_id=previous_draft.draft_id,
+            generated_at=datetime.utcnow(),
+            changes=changes,
+            summary_text=summary_text,
+        )
+
+    def _build_item_map(
+        self, draft: COPDraft
+    ) -> dict[str, tuple[COPLineItem, str]]:
+        """Build a map of candidate_id to (item, section)."""
+        items: dict[str, tuple[COPLineItem, str]] = {}
+
+        for item in draft.verified_items:
+            items[item.candidate_id] = (item, COPSection.VERIFIED.value)
+        for item in draft.in_review_items:
+            items[item.candidate_id] = (item, COPSection.IN_REVIEW.value)
+        for item in draft.disproven_items:
+            items[item.candidate_id] = (item, COPSection.DISPROVEN.value)
+
+        return items
+
+    def _extract_headline(self, line_item_text: str) -> str:
+        """Extract a short headline from the line item text."""
+        # Take first sentence or first 100 chars
+        text = line_item_text.strip()
+        if "." in text:
+            text = text.split(".")[0] + "."
+        if len(text) > 100:
+            text = text[:97] + "..."
+        return text
+
+    def _generate_summary_text(
+        self,
+        changes: list[DeltaChange],
+        is_first_draft: bool = False,
+    ) -> str:
+        """Generate a natural language summary of changes."""
+        if is_first_draft:
+            verified = sum(1 for c in changes if c.new_section == COPSection.VERIFIED.value)
+            in_review = sum(1 for c in changes if c.new_section == COPSection.IN_REVIEW.value)
+            disproven = sum(1 for c in changes if c.new_section == COPSection.DISPROVEN.value)
+
+            parts = []
+            if verified:
+                parts.append(f"{verified} verified item{'s' if verified != 1 else ''}")
+            if in_review:
+                parts.append(f"{in_review} in-review item{'s' if in_review != 1 else ''}")
+            if disproven:
+                parts.append(f"{disproven} rumor control item{'s' if disproven != 1 else ''}")
+
+            if parts:
+                return "Initial COP draft with " + ", ".join(parts) + "."
+            return "Initial COP draft with no items."
+
+        if not changes:
+            return "No changes since the previous COP draft."
+
+        parts = []
+
+        new_count = sum(1 for c in changes if c.change_type == ChangeType.NEW)
+        removed_count = sum(1 for c in changes if c.change_type == ChangeType.REMOVED)
+        status_count = sum(1 for c in changes if c.change_type == ChangeType.STATUS_CHANGE)
+        section_count = sum(1 for c in changes if c.change_type == ChangeType.SECTION_MOVE)
+        update_count = sum(1 for c in changes if c.change_type == ChangeType.CONTENT_UPDATE)
+
+        if new_count:
+            parts.append(f"{new_count} new item{'s' if new_count != 1 else ''}")
+        if removed_count:
+            parts.append(f"{removed_count} item{'s' if removed_count != 1 else ''} removed")
+        if status_count:
+            parts.append(f"{status_count} status change{'s' if status_count != 1 else ''}")
+        if section_count:
+            parts.append(f"{section_count} item{'s' if section_count != 1 else ''} moved between sections")
+        if update_count:
+            parts.append(f"{update_count} content update{'s' if update_count != 1 else ''}")
+
+        return "Since the last COP: " + ", ".join(parts) + "."

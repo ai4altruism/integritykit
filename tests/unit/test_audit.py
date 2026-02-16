@@ -7,6 +7,8 @@ Tests:
 - NFR-ABUSE-001: Abuse detection signals
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 from bson import ObjectId
 
@@ -197,7 +199,8 @@ class TestAuditService:
             roles=[UserRole.WORKSPACE_ADMIN],
         )
 
-        service = AuditService(repository=None)
+        mock_repo = MagicMock()
+        service = AuditService(repository=mock_repo)
         role = service._get_highest_role(admin)
 
         assert role == "workspace_admin"
@@ -211,7 +214,8 @@ class TestAuditService:
             roles=[UserRole.FACILITATOR, UserRole.VERIFIER],
         )
 
-        service = AuditService(repository=None)
+        mock_repo = MagicMock()
+        service = AuditService(repository=mock_repo)
         role = service._get_highest_role(facilitator)
 
         assert role == "facilitator"
@@ -225,7 +229,8 @@ class TestAuditService:
             roles=[UserRole.VERIFIER],
         )
 
-        service = AuditService(repository=None)
+        mock_repo = MagicMock()
+        service = AuditService(repository=mock_repo)
         role = service._get_highest_role(verifier)
 
         assert role == "verifier"
@@ -238,7 +243,8 @@ class TestAuditService:
             slack_team_id="T123",
         )
 
-        service = AuditService(repository=None)
+        mock_repo = MagicMock()
+        service = AuditService(repository=mock_repo)
         role = service._get_highest_role(user)
 
         assert role == "general_participant"

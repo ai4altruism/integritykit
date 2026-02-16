@@ -21,6 +21,7 @@ class ReadinessState(str, Enum):
     IN_REVIEW = "in_review"
     VERIFIED = "verified"
     BLOCKED = "blocked"
+    ARCHIVED = "archived"
 
 
 class RiskTier(str, Enum):

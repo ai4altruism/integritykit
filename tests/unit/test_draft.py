@@ -344,7 +344,7 @@ class TestHighStakesLineItems:
 
     @pytest.mark.asyncio
     async def test_high_stakes_in_review_has_recheck_time(self) -> None:
-        """High-stakes in-review items should include recheck time."""
+        """High-stakes in-review items should include urgent recheck time."""
         service = DraftService(use_llm=False)
         candidate = make_candidate(
             readiness_state=ReadinessState.IN_REVIEW,
@@ -353,12 +353,16 @@ class TestHighStakesLineItems:
 
         line_item = await service.generate_line_item(candidate)
 
+        # High-stakes should have 30-minute recheck (FR-COP-WORDING-002)
         assert line_item.recheck_time is not None
-        assert "hour" in line_item.recheck_time.lower()
+        assert "30 minutes" in line_item.recheck_time.lower()
+        # Should also have URGENT next step
+        assert line_item.next_verification_step is not None
+        assert "URGENT" in line_item.next_verification_step
 
     @pytest.mark.asyncio
-    async def test_routine_in_review_no_next_step(self) -> None:
-        """Routine in-review items should not require next step."""
+    async def test_routine_in_review_has_optional_next_step(self) -> None:
+        """Routine in-review items have optional next step and 4-hour recheck."""
         service = DraftService(use_llm=False)
         candidate = make_candidate(
             readiness_state=ReadinessState.IN_REVIEW,
@@ -367,8 +371,11 @@ class TestHighStakesLineItems:
 
         line_item = await service.generate_line_item(candidate)
 
-        assert line_item.next_verification_step is None
-        assert line_item.recheck_time is None
+        # Routine items get 4-hour recheck (FR-COP-WORDING-002)
+        assert line_item.recheck_time is not None
+        assert "4 hours" in line_item.recheck_time.lower()
+        # May or may not have next step depending on verifications
+        # (no verifications = has next step, has verifications = may not)
 
 
 # ============================================================================
