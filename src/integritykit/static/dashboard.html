@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IntegrityKit Metrics Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .loading { opacity: 0.5; pointer-events: none; }
+        .card { @apply bg-white rounded-lg shadow-md p-6; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">IntegrityKit Metrics Dashboard</h1>
+            <p class="text-gray-600 mt-2">Operational metrics for crisis-response COP coordination</p>
+            <div class="mt-4 flex items-center gap-4">
+                <div class="flex items-center gap-2">
+                    <label for="workspace" class="text-sm text-gray-600">Workspace:</label>
+                    <input type="text" id="workspace" value="default"
+                           class="border rounded px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <button onclick="loadMetrics()"
+                        class="bg-blue-600 text-white px-4 py-1 rounded hover:bg-blue-700 transition">
+                    Refresh
+                </button>
+                <span id="lastUpdated" class="text-sm text-gray-500"></span>
+            </div>
+        </header>
+
+        <!-- Error Banner -->
+        <div id="errorBanner" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
+            <span id="errorMessage"></span>
+        </div>
+
+        <!-- KPI Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="text-sm text-gray-500 uppercase tracking-wide">Avg Time to Update</div>
+                <div id="kpi-avgTime" class="text-3xl font-bold text-blue-600 mt-2">--</div>
+                <div class="text-sm text-gray-400">seconds</div>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="text-sm text-gray-500 uppercase tracking-wide">Conflict Rate</div>
+                <div id="kpi-conflictRate" class="text-3xl font-bold text-yellow-600 mt-2">--</div>
+                <div class="text-sm text-gray-400">% of clusters</div>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="text-sm text-gray-500 uppercase tracking-wide">Provenance Coverage</div>
+                <div id="kpi-provenanceCoverage" class="text-3xl font-bold text-green-600 mt-2">--</div>
+                <div class="text-sm text-gray-400">% with citations</div>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="text-sm text-gray-500 uppercase tracking-wide">Total Candidates</div>
+                <div id="kpi-totalCandidates" class="text-3xl font-bold text-purple-600 mt-2">--</div>
+                <div class="text-sm text-gray-400">in pipeline</div>
+            </div>
+        </div>
+
+        <!-- Charts Row 1 -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <!-- Readiness Distribution -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Readiness Distribution</h2>
+                <div class="h-64">
+                    <canvas id="readinessChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Time to Validated Update -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Time to Validated Update by Risk Tier</h2>
+                <div class="h-64">
+                    <canvas id="timeToUpdateChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row 2 -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <!-- Moderator Actions -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Moderator Actions by Type</h2>
+                <div class="h-64">
+                    <canvas id="moderatorActionsChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Moderator Burden Summary -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Moderator Burden Summary</h2>
+                <div class="space-y-4">
+                    <div class="flex justify-between items-center border-b pb-2">
+                        <span class="text-gray-600">Total Actions</span>
+                        <span id="mb-totalActions" class="font-semibold">--</span>
+                    </div>
+                    <div class="flex justify-between items-center border-b pb-2">
+                        <span class="text-gray-600">Actions per COP Update</span>
+                        <span id="mb-actionsPerUpdate" class="font-semibold">--</span>
+                    </div>
+                    <div class="flex justify-between items-center border-b pb-2">
+                        <span class="text-gray-600">Active Facilitators</span>
+                        <span id="mb-activeFacilitators" class="font-semibold">--</span>
+                    </div>
+                    <div class="flex justify-between items-center border-b pb-2">
+                        <span class="text-gray-600">Actions per Facilitator</span>
+                        <span id="mb-actionsPerFacilitator" class="font-semibold">--</span>
+                    </div>
+                    <div class="flex justify-between items-center border-b pb-2">
+                        <span class="text-gray-600">High-Stakes Overrides</span>
+                        <span id="mb-highStakesOverrides" class="font-semibold text-red-600">--</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-600">Edits to AI Drafts</span>
+                        <span id="mb-editsToAIDrafts" class="font-semibold">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Conflict Resolution -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Conflict Resolution</h2>
+                <div class="h-64">
+                    <canvas id="conflictChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Provenance Sources -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Provenance Sources</h2>
+                <div class="h-64">
+                    <canvas id="provenanceChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Export Section -->
+        <div class="bg-white rounded-lg shadow-md p-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">Export Metrics</h2>
+            <div class="flex gap-4">
+                <button onclick="exportMetrics('json')"
+                        class="bg-gray-600 text-white px-6 py-2 rounded hover:bg-gray-700 transition flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                    </svg>
+                    Export JSON
+                </button>
+                <button onclick="exportMetrics('csv')"
+                        class="bg-gray-600 text-white px-6 py-2 rounded hover:bg-gray-700 transition flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                    </svg>
+                    Export CSV
+                </button>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="mt-8 text-center text-gray-500 text-sm">
+            IntegrityKit - Aid Arena Integrity Kit
+        </footer>
+    </div>
+
+    <script>
+        // Chart instances
+        let readinessChart = null;
+        let timeToUpdateChart = null;
+        let moderatorActionsChart = null;
+        let conflictChart = null;
+        let provenanceChart = null;
+
+        // Color palette
+        const colors = {
+            blue: 'rgba(59, 130, 246, 0.8)',
+            green: 'rgba(34, 197, 94, 0.8)',
+            yellow: 'rgba(234, 179, 8, 0.8)',
+            red: 'rgba(239, 68, 68, 0.8)',
+            purple: 'rgba(168, 85, 247, 0.8)',
+            gray: 'rgba(107, 114, 128, 0.8)',
+        };
+
+        // Initialize charts on load
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeCharts();
+            loadMetrics();
+        });
+
+        function initializeCharts() {
+            // Readiness Distribution (Doughnut)
+            const readinessCtx = document.getElementById('readinessChart').getContext('2d');
+            readinessChart = new Chart(readinessCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['In Review', 'Verified', 'Blocked', 'Archived'],
+                    datasets: [{
+                        data: [0, 0, 0, 0],
+                        backgroundColor: [colors.blue, colors.green, colors.red, colors.gray],
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'right' }
+                    }
+                }
+            });
+
+            // Time to Update by Risk Tier (Bar)
+            const timeCtx = document.getElementById('timeToUpdateChart').getContext('2d');
+            timeToUpdateChart = new Chart(timeCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['Tier 1 (Critical)', 'Tier 2 (High)', 'Tier 3 (Medium)', 'Tier 4 (Low)'],
+                    datasets: [{
+                        label: 'Avg Time (seconds)',
+                        data: [0, 0, 0, 0],
+                        backgroundColor: [colors.red, colors.yellow, colors.blue, colors.green],
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, title: { display: true, text: 'Seconds' } }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+
+            // Moderator Actions (Bar)
+            const actionsCtx = document.getElementById('moderatorActionsChart').getContext('2d');
+            moderatorActionsChart = new Chart(actionsCtx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Action Count',
+                        data: [],
+                        backgroundColor: colors.purple,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',
+                    scales: {
+                        x: { beginAtZero: true }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+
+            // Conflict Resolution (Pie)
+            const conflictCtx = document.getElementById('conflictChart').getContext('2d');
+            conflictChart = new Chart(conflictCtx, {
+                type: 'pie',
+                data: {
+                    labels: ['Resolved', 'Unresolved'],
+                    datasets: [{
+                        data: [0, 0],
+                        backgroundColor: [colors.green, colors.yellow],
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'right' }
+                    }
+                }
+            });
+
+            // Provenance Sources (Bar)
+            const provenanceCtx = document.getElementById('provenanceChart').getContext('2d');
+            provenanceChart = new Chart(provenanceCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['Slack Permalinks', 'External Sources'],
+                    datasets: [{
+                        label: 'Citation Count',
+                        data: [0, 0],
+                        backgroundColor: [colors.blue, colors.green],
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+        }
+
+        async function loadMetrics() {
+            const workspace = document.getElementById('workspace').value || 'default';
+            const container = document.querySelector('.container');
+            container.classList.add('loading');
+            hideError();
+
+            try {
+                const response = await fetch(`/api/v1/metrics?workspace_id=${encodeURIComponent(workspace)}`);
+
+                if (!response.ok) {
+                    throw new Error(`API error: ${response.status} ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                updateDashboard(data);
+                document.getElementById('lastUpdated').textContent =
+                    `Last updated: ${new Date().toLocaleTimeString()}`;
+            } catch (error) {
+                console.error('Failed to load metrics:', error);
+                showError(`Failed to load metrics: ${error.message}`);
+            } finally {
+                container.classList.remove('loading');
+            }
+        }
+
+        function updateDashboard(data) {
+            // Update KPIs
+            const tvu = data.time_to_validated_update;
+            document.getElementById('kpi-avgTime').textContent =
+                tvu?.average_seconds?.toFixed(1) ?? '--';
+
+            const crr = data.conflicting_report_rate;
+            document.getElementById('kpi-conflictRate').textContent =
+                crr?.conflict_rate?.toFixed(1) ?? '--';
+
+            const pc = data.provenance_coverage;
+            document.getElementById('kpi-provenanceCoverage').textContent =
+                pc?.coverage_rate?.toFixed(1) ?? '--';
+
+            const rd = data.readiness_distribution;
+            document.getElementById('kpi-totalCandidates').textContent =
+                rd?.total_candidates ?? '--';
+
+            // Update Readiness Distribution Chart
+            if (rd) {
+                readinessChart.data.datasets[0].data = [
+                    rd.in_review_count || 0,
+                    rd.verified_count || 0,
+                    rd.blocked_count || 0,
+                    rd.archived_count || 0
+                ];
+                readinessChart.update();
+            }
+
+            // Update Time to Update Chart (by risk tier)
+            if (tvu?.breakdown_by_risk_tier) {
+                const tiers = ['tier_1', 'tier_2', 'tier_3', 'tier_4'];
+                timeToUpdateChart.data.datasets[0].data = tiers.map(
+                    tier => tvu.breakdown_by_risk_tier[tier] || 0
+                );
+                timeToUpdateChart.update();
+            }
+
+            // Update Moderator Actions Chart
+            const mb = data.moderator_burden;
+            if (mb?.actions_by_type) {
+                const actions = Object.entries(mb.actions_by_type);
+                moderatorActionsChart.data.labels = actions.map(([k]) => formatActionType(k));
+                moderatorActionsChart.data.datasets[0].data = actions.map(([, v]) => v);
+                moderatorActionsChart.update();
+            }
+
+            // Update Moderator Burden Summary
+            if (mb) {
+                document.getElementById('mb-totalActions').textContent =
+                    mb.total_facilitator_actions ?? '--';
+                document.getElementById('mb-actionsPerUpdate').textContent =
+                    mb.actions_per_cop_update?.toFixed(2) ?? '--';
+                document.getElementById('mb-activeFacilitators').textContent =
+                    mb.unique_facilitators_active ?? '--';
+                document.getElementById('mb-actionsPerFacilitator').textContent =
+                    mb.actions_per_facilitator?.toFixed(2) ?? '--';
+                document.getElementById('mb-highStakesOverrides').textContent =
+                    mb.high_stakes_overrides ?? '--';
+                document.getElementById('mb-editsToAIDrafts').textContent =
+                    mb.edits_to_ai_drafts ?? '--';
+            }
+
+            // Update Conflict Chart
+            if (crr) {
+                conflictChart.data.datasets[0].data = [
+                    crr.conflicts_resolved || 0,
+                    (crr.total_conflicts_detected || 0) - (crr.conflicts_resolved || 0)
+                ];
+                conflictChart.update();
+            }
+
+            // Update Provenance Chart
+            if (pc) {
+                provenanceChart.data.datasets[0].data = [
+                    pc.slack_permalink_citations || 0,
+                    pc.external_source_citations || 0
+                ];
+                provenanceChart.update();
+            }
+        }
+
+        function formatActionType(actionType) {
+            // Convert action types like "cop_candidate.promote" to "Promote Candidate"
+            const parts = actionType.split('.');
+            const action = parts[parts.length - 1];
+            return action.split('_').map(word =>
+                word.charAt(0).toUpperCase() + word.slice(1)
+            ).join(' ');
+        }
+
+        async function exportMetrics(format) {
+            const workspace = document.getElementById('workspace').value || 'default';
+            const url = `/api/v1/metrics/export?workspace_id=${encodeURIComponent(workspace)}&format=${format}`;
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`Export failed: ${response.status}`);
+                }
+
+                const blob = await response.blob();
+                const filename = `metrics_${workspace}_${new Date().toISOString().split('T')[0]}.${format}`;
+
+                // Create download link
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } catch (error) {
+                showError(`Export failed: ${error.message}`);
+            }
+        }
+
+        function showError(message) {
+            const banner = document.getElementById('errorBanner');
+            document.getElementById('errorMessage').textContent = message;
+            banner.classList.remove('hidden');
+        }
+
+        function hideError() {
+            document.getElementById('errorBanner').classList.add('hidden');
+        }
+    </script>
+</body>
+</html>
