@@ -44,6 +44,10 @@ class AuditActionType(str, Enum):
     # Access control (FR-ROLE-002)
     ACCESS_DENIED = "access.denied"
 
+    # Redaction actions (NFR-PRIVACY-002)
+    REDACTION_APPLIED = "redaction.applied"
+    REDACTION_OVERRIDE = "redaction.override"
+
 
 class AuditTargetType(str, Enum):
     """Target entity types for audit log entries."""
