@@ -9,6 +9,7 @@ from integritykit.services.database import (
 )
 from integritykit.services.embedding import EmbeddingService
 from integritykit.services.llm import LLMService
+from integritykit.services.metrics import MetricsService, get_metrics_service
 
 __all__ = [
     "ClusterRepository",
@@ -16,6 +17,8 @@ __all__ = [
     "ConflictDetectionService",
     "EmbeddingService",
     "LLMService",
+    "MetricsService",
     "SignalRepository",
     "get_database",
+    "get_metrics_service",
 ]

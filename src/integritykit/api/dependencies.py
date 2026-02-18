@@ -233,6 +233,7 @@ RequirePublishCOP = Depends(require_permission(Permission.PUBLISH_COP))
 RequireSearch = Depends(require_permission(Permission.SEARCH))
 RequireManageRoles = Depends(require_permission(Permission.MANAGE_ROLES))
 RequireViewAudit = Depends(require_permission(Permission.VIEW_AUDIT_LOG))
+RequireViewMetrics = Depends(require_permission(Permission.VIEW_METRICS))
 
 
 async def get_current_user_optional(

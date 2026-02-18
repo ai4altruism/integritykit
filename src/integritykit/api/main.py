@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from integritykit.config import settings
 from integritykit.services.database import close_mongodb_connection, connect_to_mongodb
-from integritykit.api.routes import audit, backlog, candidates, drafts, publish, search, users
+from integritykit.api.routes import audit, backlog, candidates, drafts, metrics, publish, search, users
 
 logger = structlog.get_logger(__name__)
 
@@ -66,6 +66,7 @@ app.include_router(search.router, prefix="/api/v1")
 app.include_router(candidates.router, prefix="/api/v1")
 app.include_router(drafts.router, prefix="/api/v1")
 app.include_router(publish.router, prefix="/api/v1")
+app.include_router(metrics.router, prefix="/api/v1")
 
 
 @app.get("/health")
