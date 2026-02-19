@@ -116,6 +116,16 @@ class Settings(BaseSettings):
         description="Default TTL for signal retention in days",
     )
 
+    # Two-person rule settings (FR-COP-GATE-002)
+    two_person_rule_enabled: bool = Field(
+        default=True,
+        description="Require second approver for high-stakes overrides",
+    )
+    two_person_rule_timeout_hours: int = Field(
+        default=24,
+        description="Hours before pending two-person approval expires",
+    )
+
     @property
     def monitored_channels_list(self) -> Optional[list[str]]:
         """Parse monitored channels from comma-separated string.

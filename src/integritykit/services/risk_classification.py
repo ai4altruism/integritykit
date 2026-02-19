@@ -12,7 +12,7 @@ Risk tiers:
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
 
@@ -20,11 +20,23 @@ import structlog
 from bson import ObjectId
 
 from integritykit.models.audit import AuditActionType, AuditTargetType
-from integritykit.models.cop_candidate import COPCandidate, RiskTier, RiskTierOverride
+from integritykit.models.cop_candidate import (
+    COPCandidate,
+    RiskTier,
+    RiskTierOverride,
+    TwoPersonApproval,
+    TwoPersonApprovalStatus,
+)
 from integritykit.models.user import User
 from integritykit.services.audit import AuditService, get_audit_service
 
 logger = structlog.get_logger(__name__)
+
+
+def _get_settings():
+    """Lazy import of settings to avoid validation errors in tests."""
+    from integritykit.config import settings
+    return settings
 
 
 # ============================================================================
@@ -430,8 +442,10 @@ class PublishGateResult:
 
     allowed: bool
     requires_override: bool
+    requires_two_person_approval: bool = False
     override_reason: Optional[str] = None
     warnings: list[str] = field(default_factory=list)
+    pending_approval: Optional["TwoPersonApproval"] = None
 
 
 @dataclass
@@ -451,18 +465,33 @@ class PublishGateService:
 
     High-stakes candidates require VERIFIED status unless explicitly overridden
     with a written rationale and UNCONFIRMED labeling.
+
+    When two-person rule is enabled (FR-COP-GATE-002), high-stakes overrides
+    also require approval from a second facilitator.
     """
 
     def __init__(
         self,
         audit_service: Optional[AuditService] = None,
+        two_person_service: Optional["TwoPersonApprovalService"] = None,
     ):
         """Initialize PublishGateService.
 
         Args:
             audit_service: Audit logging service
+            two_person_service: Two-person approval service (optional)
         """
         self.audit_service = audit_service or get_audit_service()
+        self._two_person_service = two_person_service
+
+    @property
+    def two_person_service(self) -> "TwoPersonApprovalService":
+        """Get two-person approval service (lazy initialization)."""
+        if self._two_person_service is None:
+            self._two_person_service = TwoPersonApprovalService(
+                audit_service=self.audit_service
+            )
+        return self._two_person_service
 
     def check_publish_gate(
         self,
@@ -494,6 +523,7 @@ class PublishGateService:
             return PublishGateResult(
                 allowed=True,
                 requires_override=False,
+                requires_two_person_approval=False,
                 warnings=warnings,
             )
 
@@ -503,45 +533,103 @@ class PublishGateService:
                 return PublishGateResult(
                     allowed=True,
                     requires_override=False,
+                    requires_two_person_approval=False,
                     warnings=["High-stakes content - verification confirmed"],
                 )
             else:
+                # Check if two-person approval is required
+                two_person_required = self.two_person_service.requires_two_person_approval(
+                    candidate, "high_stakes_publish"
+                )
+
+                # Check for existing pending approval
+                pending = self.two_person_service.get_pending_approval(
+                    candidate.id, "high_stakes_publish"
+                )
+
+                override_reason = (
+                    "High-stakes content requires VERIFIED status or explicit override. "
+                    "Override will add UNCONFIRMED label to published content."
+                )
+                if two_person_required:
+                    override_reason += (
+                        " Two-person approval is required: a second facilitator "
+                        "must approve the override before publishing."
+                    )
+
                 return PublishGateResult(
                     allowed=False,
                     requires_override=True,
-                    override_reason=(
-                        "High-stakes content requires VERIFIED status or explicit override. "
-                        "Override will add UNCONFIRMED label to published content."
-                    ),
+                    requires_two_person_approval=two_person_required,
+                    override_reason=override_reason,
                     warnings=[
                         "HIGH STAKES: This content involves life-safety information",
                         "Verification is required before publishing",
                         "Override available with written justification",
-                    ],
+                    ] + (
+                        ["Two-person approval required for override"]
+                        if two_person_required else []
+                    ),
+                    pending_approval=pending,
                 )
 
-        return PublishGateResult(allowed=True, requires_override=False)
+        return PublishGateResult(
+            allowed=True,
+            requires_override=False,
+            requires_two_person_approval=False,
+        )
 
     async def apply_high_stakes_override(
         self,
         candidate: COPCandidate,
         user: User,
         justification: str,
+        two_person_approval: Optional[TwoPersonApproval] = None,
     ) -> HighStakesOverride:
         """Apply an override for high-stakes unverified content.
+
+        When two-person rule is enabled, this method requires a completed
+        TwoPersonApproval before proceeding.
 
         Args:
             candidate: COP candidate being overridden
             user: User applying override
             justification: Required written rationale
+            two_person_approval: Completed two-person approval (required if enabled)
 
         Returns:
             HighStakesOverride record
+
+        Raises:
+            ValueError: If justification insufficient or two-person approval required
         """
         if not justification or len(justification.strip()) < 20:
             raise ValueError(
                 "High-stakes override requires detailed justification (min 20 characters)"
             )
+
+        # Check if two-person approval is required
+        requires_two_person = self.two_person_service.requires_two_person_approval(
+            candidate, "high_stakes_publish"
+        )
+
+        if requires_two_person:
+            if two_person_approval is None:
+                raise ValueError(
+                    "Two-person approval is required for high-stakes overrides. "
+                    "Request approval from a second facilitator first."
+                )
+
+            if two_person_approval.status != TwoPersonApprovalStatus.APPROVED:
+                raise ValueError(
+                    f"Two-person approval is not complete. "
+                    f"Status: {two_person_approval.status.value}"
+                )
+
+            if two_person_approval.candidate_id != candidate.id:
+                raise ValueError(
+                    "Two-person approval is for a different candidate"
+                )
 
         override = HighStakesOverride(
             candidate_id=candidate.id,
@@ -551,6 +639,21 @@ class PublishGateService:
             overridden_at=datetime.utcnow(),
             unconfirmed_label_applied=True,
         )
+
+        # Build audit context
+        audit_context: dict[str, Any] = {
+            "action": "high_stakes_override",
+            "risk_tier": candidate.risk_tier if isinstance(candidate.risk_tier, str) else candidate.risk_tier.value,
+            "readiness_state": candidate.readiness_state if isinstance(candidate.readiness_state, str) else candidate.readiness_state.value,
+        }
+
+        if two_person_approval:
+            audit_context["two_person_approval"] = {
+                "requested_by": str(two_person_approval.requested_by),
+                "approved_by": str(two_person_approval.second_approver_id),
+                "approved_at": two_person_approval.second_approval_at.isoformat()
+                if two_person_approval.second_approval_at else None,
+            }
 
         # Log to audit
         await self.audit_service.log_action(
@@ -562,13 +665,10 @@ class PublishGateService:
             changes_after={
                 "publish_gate": "override_applied",
                 "unconfirmed_label": True,
+                "two_person_approved": two_person_approval is not None,
             },
             justification=justification,
-            system_context={
-                "action": "high_stakes_override",
-                "risk_tier": candidate.risk_tier.value,
-                "readiness_state": candidate.readiness_state.value,
-            },
+            system_context=audit_context,
         )
 
         logger.warning(
@@ -576,6 +676,7 @@ class PublishGateService:
             candidate_id=str(candidate.id),
             overridden_by=str(user.id),
             justification_length=len(justification),
+            two_person_approved=two_person_approval is not None,
         )
 
         return override
@@ -592,6 +693,336 @@ class PublishGateService:
         return f"⚠️ UNCONFIRMED: {text}"
 
 
+class TwoPersonApprovalService:
+    """Service for managing two-person approval workflow (FR-COP-GATE-002).
+
+    When enabled, high-stakes overrides require approval from a second
+    facilitator before taking effect. This provides an additional safety
+    check for life-safety information.
+    """
+
+    def __init__(
+        self,
+        audit_service: Optional[AuditService] = None,
+    ):
+        """Initialize TwoPersonApprovalService.
+
+        Args:
+            audit_service: Audit logging service
+        """
+        self.audit_service = audit_service or get_audit_service()
+        self._pending_approvals: dict[str, TwoPersonApproval] = {}
+
+    def is_enabled(self) -> bool:
+        """Check if two-person rule is enabled.
+
+        Returns:
+            True if two-person rule is enabled in settings
+        """
+        return _get_settings().two_person_rule_enabled
+
+    def requires_two_person_approval(
+        self,
+        candidate: COPCandidate,
+        override_type: str,
+    ) -> bool:
+        """Check if an action requires two-person approval.
+
+        Args:
+            candidate: COP candidate being acted upon
+            override_type: Type of override being requested
+
+        Returns:
+            True if two-person approval is required
+        """
+        if not self.is_enabled():
+            return False
+
+        # Two-person rule applies to high-stakes overrides
+        return (
+            candidate.risk_tier == RiskTier.HIGH_STAKES
+            and override_type in ["high_stakes_publish", "risk_tier_override"]
+        )
+
+    async def request_approval(
+        self,
+        candidate: COPCandidate,
+        override_type: str,
+        requester: User,
+        justification: str,
+        override_context: Optional[dict] = None,
+    ) -> TwoPersonApproval:
+        """Request two-person approval for a high-stakes override.
+
+        Args:
+            candidate: COP candidate requiring approval
+            override_type: Type of override (high_stakes_publish, risk_tier_override)
+            requester: Facilitator requesting the override
+            justification: Required justification for the override
+            override_context: Additional context about the override
+
+        Returns:
+            TwoPersonApproval pending record
+        """
+        if not justification or len(justification.strip()) < 20:
+            raise ValueError(
+                "Two-person approval requires detailed justification (min 20 characters)"
+            )
+
+        # Calculate expiration
+        expires_at = datetime.utcnow() + timedelta(
+            hours=_get_settings().two_person_rule_timeout_hours
+        )
+
+        approval = TwoPersonApproval(
+            candidate_id=candidate.id,
+            override_type=override_type,
+            requested_by=requester.id,
+            requested_at=datetime.utcnow(),
+            request_justification=justification.strip(),
+            status=TwoPersonApprovalStatus.PENDING,
+            expires_at=expires_at,
+            override_context=override_context or {
+                "candidate_risk_tier": candidate.risk_tier if isinstance(candidate.risk_tier, str) else candidate.risk_tier.value,
+                "candidate_readiness_state": candidate.readiness_state if isinstance(candidate.readiness_state, str) else candidate.readiness_state.value,
+            },
+        )
+
+        # Store pending approval (in production, persist to MongoDB)
+        approval_key = f"{candidate.id}:{override_type}"
+        self._pending_approvals[approval_key] = approval
+
+        # Log to audit
+        await self.audit_service.log_action(
+            actor=requester,
+            action_type=AuditActionType.TWO_PERSON_APPROVAL_REQUESTED,
+            target_type=AuditTargetType.COP_CANDIDATE,
+            target_id=candidate.id,
+            changes_after={
+                "override_type": override_type,
+                "status": "pending",
+                "expires_at": expires_at.isoformat(),
+            },
+            justification=justification,
+            system_context={
+                "action": "two_person_approval_requested",
+                "risk_tier": candidate.risk_tier if isinstance(candidate.risk_tier, str) else candidate.risk_tier.value,
+            },
+        )
+
+        logger.info(
+            "Two-person approval requested",
+            candidate_id=str(candidate.id),
+            override_type=override_type,
+            requested_by=str(requester.id),
+            expires_at=expires_at.isoformat(),
+        )
+
+        return approval
+
+    async def grant_approval(
+        self,
+        candidate_id: ObjectId,
+        override_type: str,
+        approver: User,
+        notes: Optional[str] = None,
+    ) -> TwoPersonApproval:
+        """Grant second approval for a pending request.
+
+        Args:
+            candidate_id: COP candidate ID
+            override_type: Type of override being approved
+            approver: Second facilitator granting approval
+            notes: Optional notes from second approver
+
+        Returns:
+            Updated TwoPersonApproval with approved status
+
+        Raises:
+            ValueError: If no pending approval, already complete, or same user
+        """
+        approval_key = f"{candidate_id}:{override_type}"
+        approval = self._pending_approvals.get(approval_key)
+
+        if not approval:
+            raise ValueError("No pending two-person approval found")
+
+        if approval.is_expired:
+            approval.status = TwoPersonApprovalStatus.EXPIRED
+            raise ValueError("Two-person approval has expired")
+
+        if approval.is_complete:
+            raise ValueError("Two-person approval already completed")
+
+        if approval.requested_by == approver.id:
+            raise ValueError(
+                "Second approver must be different from the requester"
+            )
+
+        # Grant approval
+        now = datetime.utcnow()
+        approval.second_approver_id = approver.id
+        approval.second_approval_at = now
+        approval.second_approver_notes = notes
+        approval.status = TwoPersonApprovalStatus.APPROVED
+        approval.updated_at = now
+
+        # Log to audit
+        await self.audit_service.log_action(
+            actor=approver,
+            action_type=AuditActionType.TWO_PERSON_APPROVAL_GRANTED,
+            target_type=AuditTargetType.COP_CANDIDATE,
+            target_id=candidate_id,
+            changes_before={"status": "pending"},
+            changes_after={
+                "status": "approved",
+                "second_approver_id": str(approver.id),
+            },
+            justification=notes,
+            system_context={
+                "action": "two_person_approval_granted",
+                "original_requester": str(approval.requested_by),
+                "override_type": override_type,
+            },
+        )
+
+        logger.info(
+            "Two-person approval granted",
+            candidate_id=str(candidate_id),
+            override_type=override_type,
+            approved_by=str(approver.id),
+            original_requester=str(approval.requested_by),
+        )
+
+        return approval
+
+    async def deny_approval(
+        self,
+        candidate_id: ObjectId,
+        override_type: str,
+        denier: User,
+        reason: str,
+    ) -> TwoPersonApproval:
+        """Deny a pending two-person approval request.
+
+        Args:
+            candidate_id: COP candidate ID
+            override_type: Type of override being denied
+            denier: Facilitator denying the approval
+            reason: Required reason for denial
+
+        Returns:
+            Updated TwoPersonApproval with denied status
+        """
+        if not reason or len(reason.strip()) < 10:
+            raise ValueError("Denial requires a reason (min 10 characters)")
+
+        approval_key = f"{candidate_id}:{override_type}"
+        approval = self._pending_approvals.get(approval_key)
+
+        if not approval:
+            raise ValueError("No pending two-person approval found")
+
+        if approval.is_complete:
+            raise ValueError("Two-person approval already completed")
+
+        # Deny approval
+        now = datetime.utcnow()
+        approval.second_approver_id = denier.id
+        approval.second_approval_at = now
+        approval.status = TwoPersonApprovalStatus.DENIED
+        approval.denial_reason = reason.strip()
+        approval.updated_at = now
+
+        # Log to audit
+        await self.audit_service.log_action(
+            actor=denier,
+            action_type=AuditActionType.TWO_PERSON_APPROVAL_DENIED,
+            target_type=AuditTargetType.COP_CANDIDATE,
+            target_id=candidate_id,
+            changes_before={"status": "pending"},
+            changes_after={
+                "status": "denied",
+                "denier_id": str(denier.id),
+                "denial_reason": reason,
+            },
+            justification=reason,
+            system_context={
+                "action": "two_person_approval_denied",
+                "original_requester": str(approval.requested_by),
+                "override_type": override_type,
+            },
+        )
+
+        logger.warning(
+            "Two-person approval denied",
+            candidate_id=str(candidate_id),
+            override_type=override_type,
+            denied_by=str(denier.id),
+            reason=reason,
+        )
+
+        return approval
+
+    def get_pending_approval(
+        self,
+        candidate_id: ObjectId,
+        override_type: str,
+    ) -> Optional[TwoPersonApproval]:
+        """Get pending approval for a candidate if one exists.
+
+        Args:
+            candidate_id: COP candidate ID
+            override_type: Type of override
+
+        Returns:
+            TwoPersonApproval if pending, None otherwise
+        """
+        approval_key = f"{candidate_id}:{override_type}"
+        approval = self._pending_approvals.get(approval_key)
+
+        if approval and approval.is_pending:
+            return approval
+        return None
+
+    def get_all_pending_approvals(self) -> list[TwoPersonApproval]:
+        """Get all pending approval requests.
+
+        Returns:
+            List of pending TwoPersonApproval records
+        """
+        return [
+            approval for approval in self._pending_approvals.values()
+            if approval.is_pending
+        ]
+
+    async def expire_pending_approvals(self) -> list[TwoPersonApproval]:
+        """Expire all overdue pending approvals.
+
+        This should be called periodically to clean up expired requests.
+
+        Returns:
+            List of expired TwoPersonApproval records
+        """
+        expired = []
+        for _key, approval in list(self._pending_approvals.items()):
+            if approval.status == TwoPersonApprovalStatus.PENDING and approval.is_expired:
+                approval.status = TwoPersonApprovalStatus.EXPIRED
+                approval.updated_at = datetime.utcnow()
+                expired.append(approval)
+
+                # Log expiration (use system actor)
+                logger.warning(
+                    "Two-person approval expired",
+                    candidate_id=str(approval.candidate_id),
+                    override_type=approval.override_type,
+                    requested_by=str(approval.requested_by),
+                    expired_at=approval.expires_at.isoformat(),
+                )
+
+        return expired
+
+
 def get_risk_classification_service() -> RiskClassificationService:
     """Get a RiskClassificationService instance."""
     return RiskClassificationService()
@@ -600,3 +1031,8 @@ def get_risk_classification_service() -> RiskClassificationService:
 def get_publish_gate_service() -> PublishGateService:
     """Get a PublishGateService instance."""
     return PublishGateService()
+
+
+def get_two_person_approval_service() -> TwoPersonApprovalService:
+    """Get a TwoPersonApprovalService instance."""
+    return TwoPersonApprovalService()
