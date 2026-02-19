@@ -36,6 +36,12 @@ class AuditActionType(str, Enum):
     COP_UPDATE_PUBLISH = "cop_update.publish"
     COP_UPDATE_OVERRIDE = "cop_update.override"
 
+    # Two-person rule actions (FR-COP-GATE-002)
+    TWO_PERSON_APPROVAL_REQUESTED = "two_person.approval_requested"
+    TWO_PERSON_APPROVAL_GRANTED = "two_person.approval_granted"
+    TWO_PERSON_APPROVAL_DENIED = "two_person.approval_denied"
+    TWO_PERSON_APPROVAL_EXPIRED = "two_person.approval_expired"
+
     # User actions (FR-ROLE-003)
     USER_ROLE_CHANGE = "user.role_change"
     USER_SUSPEND = "user.suspend"

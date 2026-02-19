@@ -25,6 +25,91 @@ class COPUpdateStatus(str, Enum):
     SUPERSEDED = "superseded"  # Replaced by newer update
 
 
+class VersionChangeType(str, Enum):
+    """Types of changes between versions."""
+
+    ADDED = "added"  # New line item added
+    REMOVED = "removed"  # Line item removed
+    MODIFIED = "modified"  # Line item text changed
+    STATUS_CHANGED = "status_changed"  # Item moved between sections
+    PROMOTED = "promoted"  # Item promoted from in_review to verified
+    DEMOTED = "demoted"  # Item demoted from verified to in_review
+
+
+class VersionChange(BaseModel):
+    """Record of a single change between versions."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    change_type: VersionChangeType = Field(
+        ...,
+        description="Type of change",
+    )
+    candidate_id: Optional[PyObjectId] = Field(
+        default=None,
+        description="Affected candidate ID",
+    )
+    field: Optional[str] = Field(
+        default=None,
+        description="Field that changed (text, section, etc.)",
+    )
+    old_value: Optional[str] = Field(
+        default=None,
+        description="Previous value",
+    )
+    new_value: Optional[str] = Field(
+        default=None,
+        description="New value",
+    )
+    description: str = Field(
+        default="",
+        description="Human-readable change description",
+    )
+
+
+class EvidenceSnapshot(BaseModel):
+    """Frozen evidence state at time of publication (S7-2).
+
+    Preserves evidence exactly as it existed when COP was published,
+    ensuring accountability and preventing post-hoc modifications.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    candidate_id: PyObjectId = Field(
+        ...,
+        description="COP candidate this evidence belongs to",
+    )
+    slack_permalinks: list[dict] = Field(
+        default_factory=list,
+        description="Frozen Slack permalink references",
+    )
+    external_sources: list[dict] = Field(
+        default_factory=list,
+        description="Frozen external source references",
+    )
+    verifications: list[dict] = Field(
+        default_factory=list,
+        description="Frozen verification records",
+    )
+    risk_tier: str = Field(
+        default="routine",
+        description="Risk tier at time of publication",
+    )
+    readiness_state: str = Field(
+        default="in_review",
+        description="Readiness state at time of publication",
+    )
+    fields_snapshot: dict = Field(
+        default_factory=dict,
+        description="COP fields (what/where/when/who/so_what) at publication",
+    )
+    captured_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When this snapshot was captured",
+    )
+
+
 class PublishedLineItem(BaseModel):
     """A line item as published in the COP update."""
 
@@ -126,6 +211,30 @@ class COPUpdate(BaseModel):
     open_questions: list[str] = Field(
         default_factory=list,
         description="Open questions section",
+    )
+
+    # Version tracking (S7-2)
+    version: str = Field(
+        default="1.0",
+        description="Semantic version (major.minor)",
+    )
+    previous_version_id: Optional[PyObjectId] = Field(
+        default=None,
+        description="ID of the previous version (for version chain)",
+    )
+    version_changes: list[VersionChange] = Field(
+        default_factory=list,
+        description="Changes from previous version",
+    )
+    change_summary: Optional[str] = Field(
+        default=None,
+        description="Human-readable summary of changes",
+    )
+
+    # Evidence preservation (S7-2)
+    evidence_snapshots: list[EvidenceSnapshot] = Field(
+        default_factory=list,
+        description="Frozen evidence state at publication time",
     )
 
     # Provenance tracking (NFR-TRANSPARENCY-001)

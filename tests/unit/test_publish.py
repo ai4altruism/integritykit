@@ -26,6 +26,7 @@ from integritykit.models.cop_update import (
     COPUpdate,
     COPUpdateStatus,
     PublishedLineItem,
+    VersionChangeType,
 )
 from integritykit.models.user import User, UserRole
 from integritykit.services.draft import COPDraft, COPLineItem, COPSection, WordingStyle
@@ -757,3 +758,174 @@ class TestSlackBlockFormatting:
         context_text = str(context_blocks)
 
         assert "IntegrityKit" in context_text or "facilitator" in context_text.lower()
+
+
+# ============================================================================
+# Versioning Tests (S7-2)
+# ============================================================================
+
+
+@pytest.mark.unit
+class TestVersioning:
+    """Test COP update versioning (S7-2)."""
+
+    def test_version_increment_minor(self) -> None:
+        """Minor version increment for content changes."""
+        service = make_publish_service()
+
+        new_version = service.increment_version("1.0", has_major_changes=False)
+
+        assert new_version == "1.1"
+
+    def test_version_increment_major(self) -> None:
+        """Major version increment for significant changes."""
+        service = make_publish_service()
+
+        new_version = service.increment_version("1.5", has_major_changes=True)
+
+        assert new_version == "2.0"
+
+    def test_compute_version_changes_added(self) -> None:
+        """Detect added items between versions."""
+        service = make_publish_service()
+
+        prev_update = make_update(status=COPUpdateStatus.PUBLISHED)
+        prev_update.line_items = []  # Empty previous version
+
+        new_update = make_update(status=COPUpdateStatus.DRAFT)
+        # new_update has one line item by default
+
+        changes, summary = service.compute_version_changes(prev_update, new_update)
+
+        assert len(changes) == 1
+        assert changes[0].change_type.value == "added"
+        assert "1 item(s) added" in summary
+
+    def test_compute_version_changes_removed(self) -> None:
+        """Detect removed items between versions."""
+        service = make_publish_service()
+
+        prev_update = make_update(status=COPUpdateStatus.PUBLISHED)
+        # prev_update has one line item by default
+
+        new_update = make_update(status=COPUpdateStatus.DRAFT)
+        new_update.line_items = []  # Empty new version
+
+        changes, summary = service.compute_version_changes(prev_update, new_update)
+
+        assert len(changes) == 1
+        assert changes[0].change_type.value == "removed"
+        assert "1 item(s) removed" in summary
+
+    def test_compute_version_changes_modified(self) -> None:
+        """Detect modified items between versions."""
+        service = make_publish_service()
+
+        candidate_id = ObjectId()
+        prev_update = make_update(status=COPUpdateStatus.PUBLISHED)
+        prev_update.line_items = [
+            PublishedLineItem(
+                candidate_id=candidate_id,
+                section="verified",
+                status_label="VERIFIED",
+                text="Original text",
+                citations=[],
+            )
+        ]
+
+        new_update = make_update(status=COPUpdateStatus.DRAFT)
+        new_update.line_items = [
+            PublishedLineItem(
+                candidate_id=candidate_id,
+                section="verified",
+                status_label="VERIFIED",
+                text="Updated text",
+                citations=[],
+            )
+        ]
+
+        changes, summary = service.compute_version_changes(prev_update, new_update)
+
+        assert any(c.change_type.value == "modified" for c in changes)
+        assert "1 item(s) modified" in summary
+
+    def test_compute_version_changes_promoted(self) -> None:
+        """Detect promoted items (in_review -> verified)."""
+        service = make_publish_service()
+
+        candidate_id = ObjectId()
+        prev_update = make_update(status=COPUpdateStatus.PUBLISHED)
+        prev_update.line_items = [
+            PublishedLineItem(
+                candidate_id=candidate_id,
+                section="in_review",
+                status_label="IN REVIEW",
+                text="Unconfirmed info",
+                citations=[],
+            )
+        ]
+
+        new_update = make_update(status=COPUpdateStatus.DRAFT)
+        new_update.line_items = [
+            PublishedLineItem(
+                candidate_id=candidate_id,
+                section="verified",
+                status_label="VERIFIED",
+                text="Unconfirmed info",
+                citations=[],
+            )
+        ]
+
+        changes, summary = service.compute_version_changes(prev_update, new_update)
+
+        assert any(c.change_type.value == "promoted" for c in changes)
+        assert "1 item(s) promoted" in summary
+
+
+@pytest.mark.unit
+class TestEvidenceSnapshots:
+    """Test evidence snapshot preservation (S7-2)."""
+
+    @pytest.mark.asyncio
+    async def test_capture_evidence_snapshots(self) -> None:
+        """Evidence snapshots capture all evidence at publication time."""
+        service = make_publish_service()
+        candidate = make_candidate()
+
+        # Add some evidence
+        candidate.evidence.slack_permalinks = [
+            SlackPermalink(
+                url="https://slack.com/archives/C123/p123456",
+                signal_id=ObjectId(),
+                description="Original report",
+            )
+        ]
+
+        snapshots = await service.capture_evidence_snapshots([candidate])
+
+        assert len(snapshots) == 1
+        assert snapshots[0].candidate_id == candidate.id
+        assert len(snapshots[0].slack_permalinks) == 1
+        assert snapshots[0].slack_permalinks[0]["url"] == "https://slack.com/archives/C123/p123456"
+
+    @pytest.mark.asyncio
+    async def test_capture_evidence_snapshots_preserves_fields(self) -> None:
+        """Evidence snapshots include COP field values."""
+        service = make_publish_service()
+        candidate = make_candidate(what="Bridge closure at Main St")
+
+        snapshots = await service.capture_evidence_snapshots([candidate])
+
+        assert snapshots[0].fields_snapshot["what"] == "Bridge closure at Main St"
+        assert snapshots[0].fields_snapshot["where"] == "123 Main St"
+
+    @pytest.mark.asyncio
+    async def test_capture_evidence_snapshots_records_risk_tier(self) -> None:
+        """Evidence snapshots include risk tier."""
+        service = make_publish_service()
+        candidate = make_candidate()
+        candidate.risk_tier = RiskTier.HIGH_STAKES
+
+        snapshots = await service.capture_evidence_snapshots([candidate])
+
+        assert snapshots[0].risk_tier == "high_stakes"

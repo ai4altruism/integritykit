@@ -307,6 +307,114 @@ class RiskTierOverride(BaseModel):
     )
 
 
+class TwoPersonApprovalStatus(str, Enum):
+    """Status of a two-person approval request."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+
+
+class TwoPersonApproval(BaseModel):
+    """Two-person approval record for high-stakes overrides (FR-COP-GATE-002).
+
+    When two-person rule is enabled, high-stakes overrides require a second
+    facilitator to approve before the action takes effect.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    id: Optional[PyObjectId] = Field(
+        default=None,
+        alias="_id",
+        description="MongoDB document ID",
+    )
+    candidate_id: PyObjectId = Field(
+        ...,
+        description="COP candidate requiring approval",
+    )
+    override_type: str = Field(
+        ...,
+        description="Type of override (high_stakes_publish, risk_tier_override)",
+    )
+
+    # First approver (initiator)
+    requested_by: PyObjectId = Field(
+        ...,
+        description="Facilitator who initiated the override",
+    )
+    requested_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When override was requested",
+    )
+    request_justification: str = Field(
+        ...,
+        description="First approver's justification",
+    )
+
+    # Second approver
+    second_approver_id: Optional[PyObjectId] = Field(
+        default=None,
+        description="Facilitator who provided second approval",
+    )
+    second_approval_at: Optional[datetime] = Field(
+        default=None,
+        description="When second approval was granted",
+    )
+    second_approver_notes: Optional[str] = Field(
+        default=None,
+        description="Second approver's notes or concerns",
+    )
+
+    # Status tracking
+    status: TwoPersonApprovalStatus = Field(
+        default=TwoPersonApprovalStatus.PENDING,
+        description="Current approval status",
+    )
+    expires_at: datetime = Field(
+        ...,
+        description="When this approval request expires",
+    )
+    denial_reason: Optional[str] = Field(
+        default=None,
+        description="Reason for denial if denied",
+    )
+
+    # Context preserved for audit
+    override_context: dict = Field(
+        default_factory=dict,
+        description="Context about the override being requested",
+    )
+
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="Record creation timestamp",
+    )
+    updated_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="Last update timestamp",
+    )
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if approval request has expired."""
+        return datetime.utcnow() > self.expires_at
+
+    @property
+    def is_pending(self) -> bool:
+        """Check if approval is still pending."""
+        return self.status == TwoPersonApprovalStatus.PENDING and not self.is_expired
+
+    @property
+    def is_complete(self) -> bool:
+        """Check if approval process is complete (approved or denied)."""
+        return self.status in [
+            TwoPersonApprovalStatus.APPROVED,
+            TwoPersonApprovalStatus.DENIED,
+        ]
+
+
 class COPCandidateCreate(BaseModel):
     """Schema for creating a COP candidate from a cluster."""
 

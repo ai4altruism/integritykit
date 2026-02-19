@@ -3,10 +3,11 @@
 Tests:
 - FR-COP-RISK-001: Risk-tier classification
 - FR-COP-GATE-001: Publish gates for high-stakes content
+- FR-COP-GATE-002: Two-person rule for high-stakes overrides
 """
 
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from bson import ObjectId
@@ -18,14 +19,16 @@ from integritykit.models.cop_candidate import (
     Evidence,
     ReadinessState,
     RiskTier,
+    TwoPersonApproval,
+    TwoPersonApprovalStatus,
 )
 from integritykit.models.user import User, UserRole
 from integritykit.services.risk_classification import (
-    HIGH_STAKES_KEYWORDS,
     ELEVATED_KEYWORDS,
+    HIGH_STAKES_KEYWORDS,
     PublishGateService,
     RiskClassificationService,
-    RiskSignal,
+    TwoPersonApprovalService,
 )
 
 
@@ -71,6 +74,7 @@ def make_mock_audit_service():
     """Create a mock audit service."""
     service = MagicMock()
     service.log_risk_override = AsyncMock()
+    service.log_action = AsyncMock()
     return service
 
 
@@ -249,51 +253,63 @@ class TestPublishGate:
 
     def test_verified_high_stakes_can_publish(self) -> None:
         """Verified high-stakes candidates can publish."""
-        service = PublishGateService(audit_service=make_mock_audit_service())
-        candidate = make_candidate(
-            headline="Evacuation order",
-            readiness_state=ReadinessState.VERIFIED,
-            risk_tier=RiskTier.HIGH_STAKES,
-        )
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=False)
+        ):
+            service = PublishGateService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                readiness_state=ReadinessState.VERIFIED,
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
 
-        risk_service = RiskClassificationService(audit_service=make_mock_audit_service())
-        classification = risk_service.classify_candidate(candidate)
-        result = service.check_publish_gate(candidate, classification)
+            risk_service = RiskClassificationService(audit_service=make_mock_audit_service())
+            classification = risk_service.classify_candidate(candidate)
+            result = service.check_publish_gate(candidate, classification)
 
-        assert result.allowed is True
-        assert result.requires_override is False
+            assert result.allowed is True
+            assert result.requires_override is False
 
     def test_unverified_high_stakes_blocked(self) -> None:
         """Unverified high-stakes candidates are blocked."""
-        service = PublishGateService(audit_service=make_mock_audit_service())
-        candidate = make_candidate(
-            headline="Evacuation order",
-            readiness_state=ReadinessState.IN_REVIEW,
-            risk_tier=RiskTier.HIGH_STAKES,
-        )
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=False)
+        ):
+            service = PublishGateService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                readiness_state=ReadinessState.IN_REVIEW,
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
 
-        risk_service = RiskClassificationService(audit_service=make_mock_audit_service())
-        classification = risk_service.classify_candidate(candidate)
-        result = service.check_publish_gate(candidate, classification)
+            risk_service = RiskClassificationService(audit_service=make_mock_audit_service())
+            classification = risk_service.classify_candidate(candidate)
+            result = service.check_publish_gate(candidate, classification)
 
-        assert result.allowed is False
-        assert result.requires_override is True
+            assert result.allowed is False
+            assert result.requires_override is True
 
     def test_routine_can_always_publish(self) -> None:
         """Routine candidates can publish regardless of verification."""
-        service = PublishGateService(audit_service=make_mock_audit_service())
-        candidate = make_candidate(
-            headline="Community meeting",
-            readiness_state=ReadinessState.IN_REVIEW,
-            risk_tier=RiskTier.ROUTINE,
-        )
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=False)
+        ):
+            service = PublishGateService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Community meeting",
+                readiness_state=ReadinessState.IN_REVIEW,
+                risk_tier=RiskTier.ROUTINE,
+            )
 
-        risk_service = RiskClassificationService(audit_service=make_mock_audit_service())
-        classification = risk_service.classify_candidate(candidate)
-        result = service.check_publish_gate(candidate, classification)
+            risk_service = RiskClassificationService(audit_service=make_mock_audit_service())
+            classification = risk_service.classify_candidate(candidate)
+            result = service.check_publish_gate(candidate, classification)
 
-        assert result.allowed is True
-        assert result.requires_override is False
+            assert result.allowed is True
+            assert result.requires_override is False
 
 
 # ============================================================================
@@ -372,3 +388,302 @@ class TestElevatedKeywords:
     def test_resources_keywords_defined(self) -> None:
         """Resources keywords should be defined."""
         assert "resources" in ELEVATED_KEYWORDS
+
+
+# ============================================================================
+# Two-Person Approval Tests (FR-COP-GATE-002)
+# ============================================================================
+
+
+def make_mock_settings(enabled: bool = True, timeout_hours: int = 24):
+    """Create mock settings for two-person rule tests."""
+    mock = MagicMock()
+    mock.two_person_rule_enabled = enabled
+    mock.two_person_rule_timeout_hours = timeout_hours
+    return mock
+
+
+@pytest.mark.unit
+class TestTwoPersonApprovalService:
+    """Test two-person approval workflow for high-stakes overrides."""
+
+    def test_requires_approval_for_high_stakes_publish(self) -> None:
+        """High-stakes publish override requires two-person approval when enabled."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True)
+        ):
+            service = TwoPersonApprovalService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
+
+            requires = service.requires_two_person_approval(
+                candidate, "high_stakes_publish"
+            )
+
+            assert requires is True
+
+    def test_no_approval_required_when_disabled(self) -> None:
+        """No two-person approval when feature is disabled."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=False)
+        ):
+            service = TwoPersonApprovalService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
+
+            requires = service.requires_two_person_approval(
+                candidate, "high_stakes_publish"
+            )
+
+            assert requires is False
+
+    def test_no_approval_required_for_routine(self) -> None:
+        """Routine candidates don't require two-person approval."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True)
+        ):
+            service = TwoPersonApprovalService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Community meeting",
+                risk_tier=RiskTier.ROUTINE,
+            )
+
+            requires = service.requires_two_person_approval(
+                candidate, "high_stakes_publish"
+            )
+
+            assert requires is False
+
+    @pytest.mark.asyncio
+    async def test_request_approval_creates_pending(self) -> None:
+        """Requesting approval creates a pending record."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True, timeout_hours=24)
+        ):
+            service = TwoPersonApprovalService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
+            user = make_user()
+
+            approval = await service.request_approval(
+                candidate=candidate,
+                override_type="high_stakes_publish",
+                requester=user,
+                justification="This is a valid justification for override",
+            )
+
+            assert approval.status == TwoPersonApprovalStatus.PENDING
+            assert approval.requested_by == user.id
+            assert approval.candidate_id == candidate.id
+            assert approval.is_pending is True
+
+    @pytest.mark.asyncio
+    async def test_request_approval_requires_justification(self) -> None:
+        """Requesting approval requires detailed justification."""
+        service = TwoPersonApprovalService(audit_service=make_mock_audit_service())
+        candidate = make_candidate(risk_tier=RiskTier.HIGH_STAKES)
+        user = make_user()
+
+        with pytest.raises(ValueError, match="justification"):
+            await service.request_approval(
+                candidate=candidate,
+                override_type="high_stakes_publish",
+                requester=user,
+                justification="too short",
+            )
+
+    @pytest.mark.asyncio
+    async def test_grant_approval_completes_request(self) -> None:
+        """Second approver can grant approval."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True, timeout_hours=24)
+        ):
+            service = TwoPersonApprovalService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
+            requester = make_user()
+            second_approver = make_user()  # Different user
+
+            # Request approval
+            await service.request_approval(
+                candidate=candidate,
+                override_type="high_stakes_publish",
+                requester=requester,
+                justification="Valid justification for the override request",
+            )
+
+            # Grant approval from second user
+            approval = await service.grant_approval(
+                candidate_id=candidate.id,
+                override_type="high_stakes_publish",
+                approver=second_approver,
+                notes="I concur with this override",
+            )
+
+            assert approval.status == TwoPersonApprovalStatus.APPROVED
+            assert approval.second_approver_id == second_approver.id
+            assert approval.is_complete is True
+
+    @pytest.mark.asyncio
+    async def test_same_user_cannot_self_approve(self) -> None:
+        """Same user cannot be both requester and approver."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True, timeout_hours=24)
+        ):
+            service = TwoPersonApprovalService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(risk_tier=RiskTier.HIGH_STAKES)
+            user = make_user()
+
+            await service.request_approval(
+                candidate=candidate,
+                override_type="high_stakes_publish",
+                requester=user,
+                justification="Valid justification for the override",
+            )
+
+            with pytest.raises(ValueError, match="different from the requester"):
+                await service.grant_approval(
+                    candidate_id=candidate.id,
+                    override_type="high_stakes_publish",
+                    approver=user,  # Same user
+                )
+
+    @pytest.mark.asyncio
+    async def test_deny_approval_blocks_override(self) -> None:
+        """Second approver can deny the request."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True, timeout_hours=24)
+        ):
+            service = TwoPersonApprovalService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(risk_tier=RiskTier.HIGH_STAKES)
+            requester = make_user()
+            denier = make_user()
+
+            await service.request_approval(
+                candidate=candidate,
+                override_type="high_stakes_publish",
+                requester=requester,
+                justification="Valid justification for the override",
+            )
+
+            approval = await service.deny_approval(
+                candidate_id=candidate.id,
+                override_type="high_stakes_publish",
+                denier=denier,
+                reason="I disagree with this override",
+            )
+
+            assert approval.status == TwoPersonApprovalStatus.DENIED
+            assert approval.denial_reason == "I disagree with this override"
+
+    def test_expired_approval_not_pending(self) -> None:
+        """Expired approvals should not be considered pending."""
+        approval = TwoPersonApproval(
+            candidate_id=ObjectId(),
+            override_type="high_stakes_publish",
+            requested_by=ObjectId(),
+            request_justification="Test justification",
+            status=TwoPersonApprovalStatus.PENDING,
+            expires_at=datetime.utcnow() - timedelta(hours=1),  # Expired
+        )
+
+        assert approval.is_expired is True
+        assert approval.is_pending is False
+
+
+@pytest.mark.unit
+class TestPublishGateWithTwoPersonRule:
+    """Test publish gate integration with two-person rule."""
+
+    def test_publish_gate_indicates_two_person_required(self) -> None:
+        """Publish gate result includes two-person requirement."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True)
+        ):
+            service = PublishGateService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                readiness_state=ReadinessState.IN_REVIEW,
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
+
+            result = service.check_publish_gate(candidate)
+
+            assert result.allowed is False
+            assert result.requires_override is True
+            assert result.requires_two_person_approval is True
+            assert "Two-person" in result.override_reason
+
+    @pytest.mark.asyncio
+    async def test_override_requires_completed_two_person_approval(self) -> None:
+        """High-stakes override fails without completed two-person approval."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True)
+        ):
+            service = PublishGateService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
+            user = make_user()
+
+            with pytest.raises(ValueError, match="Two-person approval is required"):
+                await service.apply_high_stakes_override(
+                    candidate=candidate,
+                    user=user,
+                    justification="Valid justification for the override",
+                    two_person_approval=None,  # No approval
+                )
+
+    @pytest.mark.asyncio
+    async def test_override_succeeds_with_approved_two_person(self) -> None:
+        """High-stakes override succeeds with approved two-person approval."""
+        with patch(
+            "integritykit.services.risk_classification._get_settings",
+            return_value=make_mock_settings(enabled=True)
+        ):
+            service = PublishGateService(audit_service=make_mock_audit_service())
+            candidate = make_candidate(
+                headline="Evacuation order",
+                risk_tier=RiskTier.HIGH_STAKES,
+            )
+            user = make_user()
+
+            # Create an approved two-person approval
+            two_person_approval = TwoPersonApproval(
+                candidate_id=candidate.id,
+                override_type="high_stakes_publish",
+                requested_by=ObjectId(),
+                request_justification="Original justification",
+                status=TwoPersonApprovalStatus.APPROVED,
+                second_approver_id=ObjectId(),
+                second_approval_at=datetime.utcnow(),
+                expires_at=datetime.utcnow() + timedelta(hours=24),
+            )
+
+            override = await service.apply_high_stakes_override(
+                candidate=candidate,
+                user=user,
+                justification="Valid justification for the override",
+                two_person_approval=two_person_approval,
+            )
+
+            assert override is not None
+            assert override.unconfirmed_label_applied is True

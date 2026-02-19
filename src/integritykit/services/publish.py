@@ -20,7 +20,10 @@ from integritykit.models.cop_update import (
     COPUpdate,
     COPUpdateCreate,
     COPUpdateStatus,
+    EvidenceSnapshot,
     PublishedLineItem,
+    VersionChange,
+    VersionChangeType,
 )
 from integritykit.models.user import User
 from integritykit.services.audit import AuditService, get_audit_service
@@ -763,6 +766,380 @@ class PublishService:
             lines.append("")
 
         return "\n".join(lines)
+
+    async def capture_evidence_snapshots(
+        self,
+        candidates: list[COPCandidate],
+    ) -> list[EvidenceSnapshot]:
+        """Capture evidence snapshots for all candidates at publication time (S7-2).
+
+        Freezes the state of all evidence to ensure accountability.
+
+        Args:
+            candidates: List of candidates to snapshot
+
+        Returns:
+            List of EvidenceSnapshot objects
+        """
+        snapshots = []
+        now = datetime.utcnow()
+
+        for candidate in candidates:
+            # Convert evidence to serializable dicts
+            slack_permalinks = []
+            for permalink in candidate.evidence.slack_permalinks:
+                slack_permalinks.append({
+                    "url": permalink.url,
+                    "signal_id": str(permalink.signal_id) if permalink.signal_id else None,
+                    "description": permalink.description,
+                })
+
+            external_sources = []
+            for source in candidate.evidence.external_sources:
+                external_sources.append({
+                    "url": source.url,
+                    "source_name": source.source_name,
+                    "retrieved_at": source.retrieved_at.isoformat(),
+                    "description": source.description,
+                })
+
+            verifications = []
+            for verification in candidate.verifications:
+                verifications.append({
+                    "verified_by": str(verification.verified_by),
+                    "verified_at": verification.verified_at.isoformat(),
+                    "verification_method": verification.verification_method.value
+                    if hasattr(verification.verification_method, "value")
+                    else verification.verification_method,
+                    "verification_notes": verification.verification_notes,
+                    "confidence_level": verification.confidence_level.value
+                    if hasattr(verification.confidence_level, "value")
+                    else verification.confidence_level,
+                })
+
+            # Capture COP fields
+            fields_snapshot = {
+                "what": candidate.fields.what,
+                "where": candidate.fields.where,
+                "when": {
+                    "timestamp": candidate.fields.when.timestamp.isoformat()
+                    if candidate.fields.when.timestamp else None,
+                    "timezone": candidate.fields.when.timezone,
+                    "is_approximate": candidate.fields.when.is_approximate,
+                    "description": candidate.fields.when.description,
+                },
+                "who": candidate.fields.who,
+                "so_what": candidate.fields.so_what,
+            }
+
+            snapshot = EvidenceSnapshot(
+                candidate_id=candidate.id,
+                slack_permalinks=slack_permalinks,
+                external_sources=external_sources,
+                verifications=verifications,
+                risk_tier=candidate.risk_tier
+                if isinstance(candidate.risk_tier, str)
+                else candidate.risk_tier.value,
+                readiness_state=candidate.readiness_state
+                if isinstance(candidate.readiness_state, str)
+                else candidate.readiness_state.value,
+                fields_snapshot=fields_snapshot,
+                captured_at=now,
+            )
+            snapshots.append(snapshot)
+
+        logger.info(
+            "Captured evidence snapshots",
+            candidate_count=len(candidates),
+            snapshot_count=len(snapshots),
+        )
+
+        return snapshots
+
+    def compute_version_changes(
+        self,
+        previous_update: COPUpdate,
+        new_update: COPUpdate,
+    ) -> tuple[list[VersionChange], str]:
+        """Compute changes between two COP update versions (S7-2).
+
+        Args:
+            previous_update: The previous version
+            new_update: The new version
+
+        Returns:
+            Tuple of (list of changes, human-readable summary)
+        """
+        changes = []
+
+        # Build lookup maps
+        prev_items = {str(li.candidate_id): li for li in previous_update.line_items}
+        new_items = {str(li.candidate_id): li for li in new_update.line_items}
+
+        # Find removed items
+        for cid, item in prev_items.items():
+            if cid not in new_items:
+                changes.append(VersionChange(
+                    change_type=VersionChangeType.REMOVED,
+                    candidate_id=item.candidate_id,
+                    old_value=item.text,
+                    description=f"Removed: {item.text[:50]}...",
+                ))
+
+        # Find added and modified items
+        for cid, new_item in new_items.items():
+            if cid not in prev_items:
+                changes.append(VersionChange(
+                    change_type=VersionChangeType.ADDED,
+                    candidate_id=new_item.candidate_id,
+                    new_value=new_item.text,
+                    description=f"Added: {new_item.text[:50]}...",
+                ))
+            else:
+                prev_item = prev_items[cid]
+
+                # Check for section change
+                if prev_item.section != new_item.section:
+                    if prev_item.section == "in_review" and new_item.section == "verified":
+                        change_type = VersionChangeType.PROMOTED
+                        desc = f"Promoted to verified: {new_item.text[:50]}..."
+                    elif prev_item.section == "verified" and new_item.section == "in_review":
+                        change_type = VersionChangeType.DEMOTED
+                        desc = f"Demoted to in review: {new_item.text[:50]}..."
+                    else:
+                        change_type = VersionChangeType.STATUS_CHANGED
+                        desc = f"Moved from {prev_item.section} to {new_item.section}"
+
+                    changes.append(VersionChange(
+                        change_type=change_type,
+                        candidate_id=new_item.candidate_id,
+                        field="section",
+                        old_value=prev_item.section,
+                        new_value=new_item.section,
+                        description=desc,
+                    ))
+
+                # Check for text change
+                if prev_item.text != new_item.text:
+                    changes.append(VersionChange(
+                        change_type=VersionChangeType.MODIFIED,
+                        candidate_id=new_item.candidate_id,
+                        field="text",
+                        old_value=prev_item.text,
+                        new_value=new_item.text,
+                        description=f"Text updated: {new_item.text[:50]}...",
+                    ))
+
+        # Generate summary
+        added = len([c for c in changes if c.change_type == VersionChangeType.ADDED])
+        removed = len([c for c in changes if c.change_type == VersionChangeType.REMOVED])
+        modified = len([c for c in changes if c.change_type == VersionChangeType.MODIFIED])
+        promoted = len([c for c in changes if c.change_type == VersionChangeType.PROMOTED])
+
+        summary_parts = []
+        if added:
+            summary_parts.append(f"{added} item(s) added")
+        if removed:
+            summary_parts.append(f"{removed} item(s) removed")
+        if modified:
+            summary_parts.append(f"{modified} item(s) modified")
+        if promoted:
+            summary_parts.append(f"{promoted} item(s) promoted to verified")
+
+        summary = "; ".join(summary_parts) if summary_parts else "No changes"
+
+        return changes, summary
+
+    def increment_version(
+        self,
+        current_version: str,
+        has_major_changes: bool = False,
+    ) -> str:
+        """Increment version number.
+
+        Args:
+            current_version: Current version string (e.g., "1.0")
+            has_major_changes: True for major version bump (items removed/promoted)
+
+        Returns:
+            New version string
+        """
+        parts = current_version.split(".")
+        major = int(parts[0])
+        minor = int(parts[1]) if len(parts) > 1 else 0
+
+        if has_major_changes:
+            return f"{major + 1}.0"
+        else:
+            return f"{major}.{minor + 1}"
+
+    async def create_new_version(
+        self,
+        previous_update: COPUpdate,
+        candidate_ids: list[ObjectId],
+        user: User,
+        title: Optional[str] = None,
+    ) -> COPUpdate:
+        """Create a new version of a COP update (S7-2).
+
+        Args:
+            previous_update: Previous update to base new version on
+            candidate_ids: Candidate IDs for the new version
+            user: User creating the new version
+            title: Optional new title
+
+        Returns:
+            New COPUpdate with version tracking
+        """
+        # Load candidates
+        candidates: list[COPCandidate] = []
+        for cid in candidate_ids:
+            candidate = await self.candidate_repo.get_by_id(cid)
+            if candidate:
+                candidates.append(candidate)
+
+        if not candidates:
+            raise ValueError("No valid candidates found")
+
+        # Generate new draft
+        draft = await self.draft_service.generate_draft(
+            workspace_id=previous_update.workspace_id,
+            candidates=candidates,
+            title=title or previous_update.title,
+            include_open_questions=True,
+        )
+
+        # Convert to line items
+        line_items = []
+        for item in draft.verified_items + draft.in_review_items + draft.disproven_items:
+            line_items.append(
+                PublishedLineItem(
+                    candidate_id=ObjectId(item.candidate_id),
+                    section=item.section.value,
+                    status_label=item.status_label,
+                    text=item.line_item_text,
+                    citations=item.citations,
+                    was_edited=False,
+                )
+            )
+
+        # Capture evidence snapshots
+        evidence_snapshots = await self.capture_evidence_snapshots(candidates)
+
+        # Compute version changes
+        # Create temporary update for comparison
+        temp_update = COPUpdate(
+            workspace_id=previous_update.workspace_id,
+            title=draft.title,
+            line_items=line_items,
+            open_questions=draft.open_questions,
+            created_by=user.id,
+        )
+
+        changes, change_summary = self.compute_version_changes(previous_update, temp_update)
+
+        # Determine if major version bump needed
+        has_major = any(
+            c.change_type in [
+                VersionChangeType.REMOVED,
+                VersionChangeType.PROMOTED,
+                VersionChangeType.DEMOTED,
+            ]
+            for c in changes
+        )
+        new_version = self.increment_version(previous_update.version, has_major)
+
+        # Get next update number
+        last_update = await self.update_repo.collection.find_one(
+            {"workspace_id": previous_update.workspace_id},
+            sort=[("update_number", -1)],
+        )
+        next_number = (last_update.get("update_number", 0) if last_update else 0) + 1
+
+        # Create the new update
+        now = datetime.utcnow()
+        new_update = COPUpdate(
+            workspace_id=previous_update.workspace_id,
+            update_number=next_number,
+            title=draft.title,
+            status=COPUpdateStatus.DRAFT,
+            line_items=line_items,
+            open_questions=draft.open_questions,
+            version=new_version,
+            previous_version_id=previous_update.id,
+            version_changes=changes,
+            change_summary=change_summary,
+            evidence_snapshots=evidence_snapshots,
+            candidate_ids=[c.id for c in candidates],
+            draft_generated_at=now,
+            created_by=user.id,
+            created_at=now,
+        )
+
+        # Insert to database
+        update_dict = new_update.model_dump(by_alias=True, exclude={"id"})
+        # Convert version changes to dicts for MongoDB
+        update_dict["version_changes"] = [vc.model_dump() for vc in changes]
+        update_dict["evidence_snapshots"] = [es.model_dump() for es in evidence_snapshots]
+
+        result = await self.update_repo.collection.insert_one(update_dict)
+        new_update.id = result.inserted_id
+
+        # Log to audit
+        await self.audit_service.log_action(
+            actor=user,
+            action_type=AuditActionType.COP_UPDATE_PUBLISH,
+            target_type=AuditTargetType.COP_UPDATE,
+            target_id=new_update.id,
+            changes_before={"version": previous_update.version},
+            changes_after={
+                "version": new_version,
+                "change_count": len(changes),
+            },
+            system_context={
+                "action": "create_new_version",
+                "previous_version_id": str(previous_update.id),
+                "change_summary": change_summary,
+            },
+        )
+
+        logger.info(
+            "Created new COP update version",
+            update_id=str(new_update.id),
+            version=new_version,
+            previous_version_id=str(previous_update.id),
+            change_count=len(changes),
+        )
+
+        return new_update
+
+    async def get_version_history(
+        self,
+        update_id: ObjectId,
+    ) -> list[COPUpdate]:
+        """Get the version history for a COP update (S7-2).
+
+        Args:
+            update_id: ID of any update in the version chain
+
+        Returns:
+            List of all versions, oldest first
+        """
+        history = []
+        current = await self.update_repo.get_by_id(update_id)
+
+        if not current:
+            return history
+
+        # Traverse back to find all previous versions
+        while current:
+            history.insert(0, current)
+            if current.previous_version_id:
+                current = await self.update_repo.get_by_id(current.previous_version_id)
+            else:
+                break
+
+        return history
 
 
 # Clarification templates (S4-4)
