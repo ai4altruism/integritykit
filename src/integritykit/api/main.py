@@ -3,9 +3,11 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Callable
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -23,6 +25,22 @@ from integritykit.config import settings
 from integritykit.services.database import close_mongodb_connection, connect_to_mongodb
 
 logger = structlog.get_logger(__name__)
+
+# Simple in-memory rate limiter (for production, use Redis-based limiter)
+_rate_limit_store: dict[str, list[float]] = {}
+
+
+def get_rate_limit_key(request: Request) -> str:
+    """Get rate limit key from request (user ID or IP)."""
+    # Try to get user from request state (set by auth middleware)
+    user = getattr(request.state, "user", None)
+    if user and hasattr(user, "id"):
+        return f"user:{user.id}"
+    # Fall back to IP address
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return f"ip:{forwarded.split(',')[0].strip()}"
+    return f"ip:{request.client.host if request.client else 'unknown'}"
 
 
 @asynccontextmanager
@@ -68,6 +86,94 @@ app = FastAPI(
     description="Aid Arena Integrity Kit - Slack coordination layer for crisis-response COP updates",
     lifespan=lifespan,
 )
+
+# Add CORS middleware if configured (S7-8: Security hardening)
+if settings.cors_allowed_origins:
+    origins = [o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+            allow_headers=["*"],
+        )
+        logger.info("CORS enabled", origins=origins)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next: Callable) -> Response:
+    """Add security headers to all responses (S7-8: Security hardening)."""
+    response = await call_next(request)
+    # Prevent clickjacking
+    response.headers["X-Frame-Options"] = "DENY"
+    # Prevent MIME type sniffing
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # XSS protection (legacy but still useful)
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    # Referrer policy
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # Content Security Policy (basic)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' cdn.jsdelivr.net cdn.tailwindcss.com; "
+        "style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; "
+        "img-src 'self' data:; "
+        "connect-src 'self'"
+    )
+    return response
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next: Callable) -> Response:
+    """Rate limiting middleware (S7-8: Security hardening).
+
+    Simple in-memory rate limiter. For production, use Redis-based limiter.
+    """
+    import time
+
+    # Skip rate limiting for health checks and static files
+    if request.url.path in ("/health", "/", "/docs", "/openapi.json"):
+        return await call_next(request)
+    if request.url.path.startswith("/static"):
+        return await call_next(request)
+
+    if not settings.rate_limit_enabled:
+        return await call_next(request)
+
+    key = get_rate_limit_key(request)
+    now = time.time()
+    window = 60.0  # 1 minute window
+    max_requests = settings.rate_limit_requests_per_minute
+
+    # Clean old entries and add current request
+    if key not in _rate_limit_store:
+        _rate_limit_store[key] = []
+
+    _rate_limit_store[key] = [
+        t for t in _rate_limit_store[key] if t > now - window
+    ]
+
+    if len(_rate_limit_store[key]) >= max_requests:
+        logger.warning(
+            "Rate limit exceeded",
+            key=key,
+            requests=len(_rate_limit_store[key]),
+            limit=max_requests,
+        )
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "Rate limit exceeded",
+                "detail": f"Maximum {max_requests} requests per minute",
+                "retry_after": 60,
+            },
+            headers={"Retry-After": "60"},
+        )
+
+    _rate_limit_store[key].append(now)
+    return await call_next(request)
+
 
 # Register API routers
 app.include_router(users.router, prefix="/api/v1")
