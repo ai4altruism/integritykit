@@ -33,6 +33,12 @@ from integritykit.services.audit import AuditService, get_audit_service
 logger = structlog.get_logger(__name__)
 
 
+def _get_abuse_detection_service():
+    """Lazy import of abuse detection service to avoid circular imports."""
+    from integritykit.services.abuse_detection import get_abuse_detection_service
+    return get_abuse_detection_service()
+
+
 def _get_settings():
     """Lazy import of settings to avoid validation errors in tests."""
     from integritykit.config import settings
@@ -678,6 +684,28 @@ class PublishGateService:
             justification_length=len(justification),
             two_person_approved=two_person_approval is not None,
         )
+
+        # Record override for abuse detection (S7-3)
+        try:
+            abuse_service = _get_abuse_detection_service()
+            alert = await abuse_service.record_override(
+                user=user,
+                action_type="high_stakes_override",
+                target_id=candidate.id,
+            )
+            if alert:
+                logger.warning(
+                    "Abuse alert triggered for user",
+                    user_id=str(user.id),
+                    alert_type=alert.alert_type,
+                    override_count=alert.override_count,
+                )
+        except Exception as e:
+            # Don't fail the override if abuse detection fails
+            logger.error(
+                "Failed to record override for abuse detection",
+                error=str(e),
+            )
 
         return override
 

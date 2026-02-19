@@ -126,6 +126,24 @@ class Settings(BaseSettings):
         description="Hours before pending two-person approval expires",
     )
 
+    # Anti-abuse detection settings (S7-3, NFR-ABUSE-001)
+    abuse_detection_enabled: bool = Field(
+        default=True,
+        description="Enable anti-abuse detection for rapid-fire overrides",
+    )
+    abuse_override_threshold: int = Field(
+        default=5,
+        description="Number of overrides in window to trigger alert",
+    )
+    abuse_override_window_minutes: int = Field(
+        default=30,
+        description="Time window in minutes for override rate detection",
+    )
+    abuse_alert_slack_channel: Optional[str] = Field(
+        default=None,
+        description="Slack channel ID for abuse alerts (optional)",
+    )
+
     @property
     def monitored_channels_list(self) -> Optional[list[str]]:
         """Parse monitored channels from comma-separated string.
