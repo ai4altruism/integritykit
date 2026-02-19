@@ -1,8 +1,8 @@
 # Aid Arena Integrity Kit — Architecture Documentation
 
-**Version**: 1.0
-**Date**: 2026-02-15
-**Status**: Draft
+**Version**: 1.1
+**Date**: 2026-02-18
+**Status**: Draft (updated for v0.4.0)
 
 ---
 
@@ -50,7 +50,7 @@ The Aid Arena Integrity Kit is a FastAPI-based backend system that operates in *
 │                              │                                         │
 │  ┌───────────────────────────┼───────────────────────────────────────┐ │
 │  │  Middleware & Auth        │                                       │ │
-│  │  RBAC Enforcement • Audit Logging • Rate Limiting                 │ │
+│  │  RBAC • Audit • Rate Limiting • CORS • Security Headers           │ │
 │  └───────────────────────────┼───────────────────────────────────────┘ │
 │                              │                                         │
 │  ┌───────────────────────────┼───────────────────────────────────────┐ │
@@ -161,6 +161,10 @@ Business logic orchestration:
 - **Candidate Manager**: Promotes clusters, tracks readiness state
 - **Publishing Service**: Assembles COP drafts, enforces publish gates
 - **Search Service**: Full-text and semantic search across signals/clusters
+- **Two-Person Approval Service**: Manages approval workflow for high-stakes operations (v0.4.0)
+- **Suspension Service**: Handles user permission suspension and reinstatement (v0.4.0)
+- **Abuse Detection Service**: Monitors for rapid-fire override patterns (v0.4.0)
+- **Data Retention Service**: Manages TTL and purge operations (v0.4.0)
 
 ### 4. LLM Service Layer
 
@@ -380,11 +384,13 @@ def validate_publish_gates(candidates):
 9. Log publish action to audit trail
 ```
 
-**Two-Person Rule** (v1.0 feature):
+**Two-Person Rule** (v0.4.0):
 - High-stakes overrides require second approver
-- First facilitator drafts and justifies override
-- Second facilitator reviews and approves
+- First facilitator initiates and justifies override request
+- Second facilitator (different user) reviews and approves
+- Pending approvals expire after configurable timeout (default 24h)
 - Both identities logged in audit trail
+- See [Security Model](#two-person-rule-v040) for details
 
 ---
 
@@ -669,6 +675,98 @@ async def promote_cluster_to_candidate(cluster_id: str, current_user: User):
 - Includes old roles, new roles, actor, justification
 - Workspace admins can view full role history
 
+### API Security (v0.4.0)
+
+**Rate Limiting**:
+- Configurable requests per minute per user (default: 60)
+- In-memory rate limiter with sliding window
+- Returns `429 Too Many Requests` with `Retry-After` header
+- Health checks and static files exempt
+
+```python
+# Configuration
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_REQUESTS_PER_MINUTE=60
+```
+
+**CORS Protection**:
+- Configurable allowed origins (disabled by default)
+- Supports credentials for authenticated requests
+- Restricted HTTP methods and headers
+
+```python
+# Configuration
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+**Security Headers**:
+All responses include:
+- `X-Frame-Options: DENY` - Prevents clickjacking
+- `X-Content-Type-Options: nosniff` - Prevents MIME sniffing
+- `X-XSS-Protection: 1; mode=block` - XSS protection
+- `Referrer-Policy: strict-origin-when-cross-origin` - Controls referrer
+- `Content-Security-Policy` - Restricts resource loading
+
+**Input Sanitization**:
+- Search queries escaped to prevent ReDoS attacks
+- All user input validated via Pydantic models
+- MongoDB queries use parameterized operations
+
+### Two-Person Rule (v0.4.0)
+
+High-stakes operations require approval from two different users:
+
+**Workflow**:
+```
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│  Requester   │───▶│   Pending    │───▶│   Approver   │
+│  initiates   │    │  (24h TTL)   │    │  (different) │
+└──────────────┘    └──────────────┘    └──────────────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │   Approved   │
+                    │  (or expired)│
+                    └──────────────┘
+```
+
+**Operations Requiring Two-Person Approval**:
+- Publishing high-stakes unverified COP items
+- Overriding conflict blocks
+- Risk tier downgrades
+
+**Configuration**:
+```python
+TWO_PERSON_RULE_ENABLED=true
+TWO_PERSON_RULE_TIMEOUT_HOURS=24
+```
+
+**Enforcement**:
+- Approver must be different from requester
+- Both must have appropriate permissions
+- Full audit trail with both identities
+- Expired approvals logged and rejected
+
+### User Suspension (v0.4.0)
+
+Workspace admins can suspend user permissions:
+
+**Suspension Features**:
+- Suspended users lose all permissions except viewing published COPs
+- Roles preserved but inactive during suspension
+- Full suspension history maintained
+- Reinstatement restores previous permissions
+
+**Protection Rules**:
+- Cannot suspend yourself
+- Cannot suspend another admin
+- Cannot double-suspend already suspended user
+
+**Audit Trail**:
+- Suspension logged with reason and admin identity
+- Reinstatement logged with optional reason
+- Full history accessible via API
+
 ### Audit Logging
 
 **All sensitive actions logged**:
@@ -678,8 +776,10 @@ async def promote_cluster_to_candidate(cluster_id: str, current_user: User):
 - Verification actions
 - COP publishing
 - Role assignments
-- User suspensions
+- User suspensions and reinstatements
+- Two-person approvals
 - Access denials
+- Abuse detection alerts
 
 **Audit log fields**:
 - `timestamp`, `actor_id`, `actor_role`
@@ -687,25 +787,52 @@ async def promote_cluster_to_candidate(cluster_id: str, current_user: User):
 - `changes` (before/after state)
 - `justification` (for overrides)
 - `is_flagged` (abuse detection)
+- `system_context` (additional metadata)
 
 **Immutability**:
 - Audit log documents cannot be edited after creation
 - MongoDB collection-level write-once enforcement
 - Backup retention separate from signal retention
 
-### Abuse Detection
+### Abuse Detection (v0.4.0)
 
-System flags suspicious patterns:
+Enhanced monitoring for suspicious patterns:
 
-1. **Bulk high-stakes overrides**: Facilitator publishes >5 high-stakes unverified items in <1 hour
-2. **Rapid role escalation**: User granted facilitator/admin role and immediately performs sensitive actions
-3. **Verification bypass**: Verifier marks item verified without adding external source
-4. **Publish rate abuse**: Facilitator publishes >10 COP updates in <1 hour
+**Detected Patterns**:
 
-**Response**:
-- Alert sent to workspace admin
-- Flagged actions visible in audit log UI
-- Admin can suspend user's publish permissions
+| Pattern | Threshold | Window | Response |
+|---------|-----------|--------|----------|
+| Rapid-fire overrides | 5 overrides | 30 minutes | Alert + flag |
+| Bulk high-stakes publishes | 5 items | 1 hour | Alert + flag |
+| Rapid role escalation | Immediate use after grant | 5 minutes | Flag for review |
+| Verification bypass | No external source | Per action | Warning |
+
+**Configuration**:
+```python
+ABUSE_DETECTION_ENABLED=true
+ABUSE_OVERRIDE_THRESHOLD=5
+ABUSE_OVERRIDE_WINDOW_MINUTES=30
+ABUSE_ALERT_SLACK_CHANNEL=C123456  # Optional
+```
+
+**Response Actions**:
+- Alert sent to configured Slack channel (optional)
+- Action flagged in audit log with `is_flagged: true`
+- Admin notified via workspace admin channel
+- Admin can suspend user's permissions
+
+**AbuseDetectionService**:
+```python
+# Check for abuse patterns
+result = await abuse_service.check_override_rate(
+    user=current_user,
+    action_type="high_stakes_publish"
+)
+
+if result.is_abuse:
+    # Alert triggered automatically
+    logger.warning("Abuse pattern detected", user_id=user.id)
+```
 
 ### Data Privacy
 
@@ -715,11 +842,41 @@ System flags suspicious patterns:
 - Facilitator override with justification
 - Redacted fields logged in `signals.redaction`
 
-**Data Retention** (NFR-PRIVACY-003):
-- Configurable TTL per workspace (default 90 days)
-- Signals marked `is_archived: true` exempt from deletion
-- Archived signals: referenced in published COPs, high-stakes verified
-- Purge events logged to audit trail
+**Data Retention** (v0.4.0 - NFR-PRIVACY-003):
+
+Automated data lifecycle management:
+
+| Entity Type | Default Retention | Purge Behavior |
+|-------------|-------------------|----------------|
+| Signals | 90 days (configurable) | TTL-based expiration |
+| Clusters | Until orphaned | Purged when all signals expire |
+| Audit Logs | 180 days (2x signal retention) | Separate purge schedule |
+
+**Configuration**:
+```python
+DEFAULT_RETENTION_DAYS=90
+```
+
+**DataRetentionService Features**:
+- Set/extend retention per entity
+- Dry-run mode for purge preview
+- Batch deletion with configurable batch size
+- ChromaDB embedding cleanup
+- Full purge statistics and logging
+
+```python
+# Run full purge (dry run first)
+results = await retention_service.run_full_purge(dry_run=True)
+# Returns: signals=50, clusters=5, audit_logs=100
+
+# Execute purge
+results = await retention_service.run_full_purge(dry_run=False)
+```
+
+**Retention Extension**:
+- Users with appropriate permissions can extend retention
+- Extension logged to audit trail with justification
+- Used for ongoing investigations or legal holds
 
 ---
 
@@ -957,6 +1114,6 @@ logger.info(
 
 ---
 
-**Document Status**: Draft v1.0
-**Last Updated**: 2026-02-15
+**Document Status**: Draft v1.1
+**Last Updated**: 2026-02-18
 **Authors**: Aid Arena team with Claude Code assistance

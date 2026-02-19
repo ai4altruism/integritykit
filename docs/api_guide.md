@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| **Version** | 1.0 |
-| **Date** | 2026-02-15 |
+| **Version** | 1.1 |
+| **Date** | 2026-02-18 |
 | **API Base URL** | `https://api.integritykit.aidarena.org/api/v1` |
 
 ---
@@ -31,6 +31,9 @@ The Aid Arena Integrity Kit API provides programmatic access to the Common Opera
 - Comprehensive audit logging
 - Evidence-based verification workflow
 - Publish gate enforcement for high-stakes information
+- Two-person approval for high-stakes operations (v0.4.0)
+- User suspension and reinstatement (v0.4.0)
+- Rate limiting and security headers (v0.4.0)
 
 **Base URL:** `https://api.integritykit.aidarena.org/api/v1`
 
@@ -124,6 +127,10 @@ The API enforces role-based access control (RBAC). Every user has one or more ro
 | `POST /cop/publish` | facilitator, workspace_admin |
 | `GET /audit` | facilitator, workspace_admin |
 | `GET /users`, `POST /users/{id}/roles` | workspace_admin |
+| `POST /users/{id}/suspend` | workspace_admin |
+| `POST /users/{id}/reinstate` | workspace_admin |
+| `POST /approvals/request` | facilitator, workspace_admin |
+| `POST /approvals/{id}/approve` | facilitator, workspace_admin |
 
 ### Access Denied Response
 
@@ -449,6 +456,148 @@ GET /api/v1/search?q=water+advisory&type=signal&start_time=2026-02-08T00:00:00Z
 
 ---
 
+### Example 5: Two-Person Approval for High-Stakes Override (v0.4.0)
+
+**Scenario:** Publishing a high-stakes unverified item requires approval from a second facilitator.
+
+**Step 1: Request approval**
+```bash
+POST /api/v1/approvals/request
+
+{
+  "candidate_id": "65d4f2c3e4b0a8c9d1234571",
+  "override_type": "high_stakes_publish",
+  "justification": "Emergency shelter closure requires immediate publication for community safety. Time-sensitive - residents need this information now."
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "65d4f2c3e4b0a8c9d1234590",
+    "candidate_id": "65d4f2c3e4b0a8c9d1234571",
+    "override_type": "high_stakes_publish",
+    "status": "pending",
+    "requester_id": "65d4f2c3e4b0a8c9d1234501",
+    "justification": "Emergency shelter closure requires immediate publication...",
+    "expires_at": "2026-02-16T16:30:00.000Z",
+    "created_at": "2026-02-15T16:30:00.000Z"
+  }
+}
+```
+
+**Step 2: Second facilitator approves**
+```bash
+POST /api/v1/approvals/65d4f2c3e4b0a8c9d1234590/approve
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "65d4f2c3e4b0a8c9d1234590",
+    "status": "approved",
+    "approver_id": "65d4f2c3e4b0a8c9d1234502",
+    "second_approval_at": "2026-02-15T16:45:00.000Z"
+  }
+}
+```
+
+**Step 3: Now facilitator can publish with the approved override**
+```bash
+POST /api/v1/cop/publish
+
+{
+  "slack_channel_id": "C01COP12345",
+  "approval_id": "65d4f2c3e4b0a8c9d1234590"
+}
+```
+
+**Note:** The approver must be different from the requester. Attempting to approve your own request returns:
+
+```json
+{
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "Second approver must be different from the requester",
+    "request_id": "req_abc123"
+  }
+}
+```
+
+---
+
+### Example 6: Suspend and Reinstate User (v0.4.0)
+
+**Scenario:** Admin suspends a facilitator due to policy violation, then reinstates after review.
+
+**Step 1: Admin suspends user**
+```bash
+POST /api/v1/users/65d4f2c3e4b0a8c9d1234505/suspend
+
+{
+  "reason": "Multiple publish gate overrides without proper verification. Pending review of actions."
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "65d4f2c3e4b0a8c9d1234505",
+    "is_suspended": true,
+    "roles": ["facilitator"],
+    "suspension_history": [
+      {
+        "suspended_at": "2026-02-15T17:00:00.000Z",
+        "suspended_by": "65d4f2c3e4b0a8c9d1234500",
+        "suspension_reason": "Multiple publish gate overrides without proper verification..."
+      }
+    ]
+  }
+}
+```
+
+**Step 2: Admin reinstates user after review**
+```bash
+POST /api/v1/users/65d4f2c3e4b0a8c9d1234505/reinstate
+
+{
+  "reason": "Review complete. Additional training provided. User cleared for facilitator duties."
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "65d4f2c3e4b0a8c9d1234505",
+    "is_suspended": false,
+    "roles": ["facilitator"],
+    "suspension_history": [
+      {
+        "suspended_at": "2026-02-15T17:00:00.000Z",
+        "suspended_by": "65d4f2c3e4b0a8c9d1234500",
+        "suspension_reason": "Multiple publish gate overrides...",
+        "reinstated_at": "2026-02-15T18:30:00.000Z",
+        "reinstated_by": "65d4f2c3e4b0a8c9d1234500",
+        "reinstatement_reason": "Review complete. Additional training provided..."
+      }
+    ]
+  }
+}
+```
+
+**Suspension Rules:**
+- Cannot suspend yourself
+- Cannot suspend another workspace_admin
+- Cannot double-suspend an already suspended user
+- Suspended users lose all permissions except viewing published COPs
+- Roles are preserved but inactive during suspension
+
+---
+
 ## Error Handling
 
 All errors follow a consistent format:
@@ -553,43 +702,55 @@ POST /api/v1/cop/publish
 
 ## Rate Limiting
 
-The API enforces rate limits to prevent abuse and ensure system stability.
+The API enforces rate limits to prevent abuse and ensure system stability. (Enhanced in v0.4.0)
 
 ### Limits
 
-| Endpoint Pattern | Limit |
+| Endpoint Pattern | Default Limit |
 |---|---|
-| `POST /cop/publish` | 1 request per 5 minutes |
-| All other endpoints | 100 requests per minute |
+| All API endpoints | 60 requests per minute per user |
+| Health check, static files | No limit |
 
-### Rate Limit Headers
+Rate limits are configurable via environment variables:
+- `RATE_LIMIT_ENABLED`: Enable/disable rate limiting (default: `true`)
+- `RATE_LIMIT_REQUESTS_PER_MINUTE`: Requests per minute (default: `60`)
 
-All responses include rate limit headers:
-
-```
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 87
-X-RateLimit-Reset: 1708020660
-```
-
-### Rate Limit Exceeded
+### Rate Limit Response
 
 When rate limit is exceeded:
 
 **Response (429 Too Many Requests):**
 ```json
 {
-  "error": {
-    "code": "RATE_LIMIT_EXCEEDED",
-    "message": "Too many COP publish requests. Maximum 1 per 5 minutes.",
-    "request_id": "req_ghi789"
-  }
+  "error": "Rate limit exceeded",
+  "detail": "Maximum 60 requests per minute",
+  "retry_after": 60
 }
 ```
 
 **Headers:**
 ```
-Retry-After: 240
+Retry-After: 60
+```
+
+### Security Headers (v0.4.0)
+
+All API responses include security headers:
+
+| Header | Value | Purpose |
+|---|---|---|
+| `X-Frame-Options` | `DENY` | Prevents clickjacking |
+| `X-Content-Type-Options` | `nosniff` | Prevents MIME sniffing |
+| `X-XSS-Protection` | `1; mode=block` | XSS protection |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Controls referrer information |
+| `Content-Security-Policy` | Configured for dashboard | Restricts resource loading |
+
+### CORS (v0.4.0)
+
+CORS is disabled by default. Configure allowed origins via environment variable:
+
+```bash
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 ```
 
 ---
