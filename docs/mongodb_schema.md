@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| **Version** | 1.0 |
-| **Date** | 2026-02-15 |
+| **Version** | 1.1 |
+| **Date** | 2026-02-18 |
 | **Database** | MongoDB 7.0+ |
 | **Design Philosophy** | Document-oriented with embedded evidence packs, indexed for search and temporal queries, optimized for write-heavy ingestion and read-heavy facilitator workflows |
 
@@ -43,6 +43,7 @@
 | `cop_updates` | Published COP artifacts | Low (5-100 versions per event) | Append-only (versioned) | Diff generation, audit trail |
 | `audit_log` | Immutable action history | Medium (1K-100K actions per event) | Append-only | Compliance review, abuse detection |
 | `users` | User records with roles | Low (10-1000 users per workspace) | Infrequent updates (role changes) | RBAC enforcement, suspension checks |
+| `two_person_approvals` | Pending approval requests (v0.4.0) | Low (0-50 pending per workspace) | Create/update on approval | Two-person rule enforcement |
 
 ---
 
@@ -589,6 +590,70 @@
 
 ---
 
+### 7. `two_person_approvals` (v0.4.0)
+
+**Purpose:** Track pending and completed two-person approval requests for high-stakes operations.
+
+**Schema:**
+
+```javascript
+{
+  _id: ObjectId,
+
+  // Target entity
+  candidate_id: ObjectId,           // Required. COP candidate requiring approval
+  override_type: String,            // Required. Enum: "high_stakes_publish", "conflict_override", "risk_tier_downgrade"
+
+  // Request details
+  requester_id: ObjectId,           // Required. User who initiated the request
+  justification: String,            // Required. Reason for override (min 10 chars)
+
+  // Approval status
+  status: String,                   // Required. Enum: "pending", "approved", "expired", "cancelled"
+
+  // Approver (if approved)
+  approver_id: ObjectId,            // Optional. Must be different from requester_id
+  second_approval_at: Date,         // Optional. When second approval was granted
+
+  // Expiration
+  expires_at: Date,                 // Required. Request expiration timestamp
+  expired_at: Date,                 // Optional. When request expired (if status="expired")
+
+  // Audit metadata
+  created_at: Date,                 // When request was created
+  updated_at: Date                  // Last status change
+}
+```
+
+**Validation Rules:**
+
+- `candidate_id` must reference valid cop_candidate document
+- `override_type` must be in allowed enum
+- `approver_id` must be different from `requester_id` (enforced at application level)
+- If `status` is "approved", must have `approver_id` and `second_approval_at`
+- `expires_at` must be in future when created (typically 24 hours from creation)
+- Only one "pending" approval per `candidate_id` + `override_type` combination
+
+**Example Document:**
+
+```javascript
+{
+  _id: ObjectId("abc123..."),
+  candidate_id: ObjectId("def456..."),
+  override_type: "high_stakes_publish",
+  requester_id: ObjectId("user1..."),
+  justification: "Emergency shelter closure requires immediate publication for community safety.",
+  status: "approved",
+  approver_id: ObjectId("user2..."),
+  second_approval_at: ISODate("2026-02-18T15:30:00Z"),
+  expires_at: ISODate("2026-02-19T14:00:00Z"),
+  created_at: ISODate("2026-02-18T14:00:00Z"),
+  updated_at: ISODate("2026-02-18T15:30:00Z")
+}
+```
+
+---
+
 ## Index Strategy
 
 ### Performance Goals
@@ -828,6 +893,40 @@ db.users.createIndex(
 )
 ```
 
+#### `two_person_approvals` Collection (v0.4.0)
+
+```javascript
+// Lookup pending approvals for candidate
+db.two_person_approvals.createIndex(
+  { candidate_id: 1, override_type: 1, status: 1 },
+  { name: "idx_candidate_override_status" }
+)
+
+// Find pending approvals by status
+db.two_person_approvals.createIndex(
+  { status: 1, expires_at: 1 },
+  { name: "idx_status_expiry" }
+)
+
+// User's pending requests
+db.two_person_approvals.createIndex(
+  { requester_id: 1, status: 1 },
+  { name: "idx_requester_status" }
+)
+
+// Approver activity tracking
+db.two_person_approvals.createIndex(
+  { approver_id: 1, second_approval_at: -1 },
+  { sparse: true, name: "idx_approver_activity" }
+)
+
+// TTL for expired pending requests (optional cleanup)
+db.two_person_approvals.createIndex(
+  { expires_at: 1 },
+  { expireAfterSeconds: 86400, name: "idx_ttl_cleanup" }  // Clean up 24h after expiry
+)
+```
+
 ---
 
 ## Relationships and References
@@ -838,6 +937,8 @@ db.users.createIndex(
 signals (many) ──┐
                  ├──> clusters (one) ──> cop_candidates (one) ──> cop_updates (many)
 signals (many) ──┘                               │
+                                                  │
+                          two_person_approvals ◀──┤
                                                   │
 users (one) ─────────────────────────────────────┴──> audit_log (many)
 ```

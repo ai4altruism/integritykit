@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: Aid Arena Integrity Kit API
-  version: "1.0.0"
+  version: "1.1.0"
   description: |
     REST API for the Aid Arena Integrity Kit facilitator workflow.
 
@@ -17,6 +17,11 @@ info:
     - Facilitator: Full backlog and candidate management
     - Verifier: Verification actions on candidates
     - Workspace Admin: User and role management
+
+    **v1.1.0 Updates (v0.4.0):**
+    - Added user suspension and reinstatement endpoints
+    - Added two-person approval workflow endpoints
+    - Enhanced security with rate limiting and CORS configuration
   contact:
     name: Aid Arena Support
     email: support@aidarena.org
@@ -49,6 +54,8 @@ tags:
     description: Audit log access and compliance reporting
   - name: Users
     description: User and role management
+  - name: Approvals
+    description: Two-person approval workflow for high-stakes operations (v0.4.0)
 
 security:
   - slackOAuth: []
@@ -239,6 +246,257 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /users/{user_id}/suspend:
+    post:
+      tags: [Users]
+      summary: Suspend user (v0.4.0)
+      description: |
+        Suspend a user's permissions. Suspended users lose all permissions
+        except viewing published COPs. Roles are preserved but inactive.
+        Requires workspace_admin role.
+
+        **Restrictions:**
+        - Cannot suspend yourself
+        - Cannot suspend another workspace_admin
+        - Cannot suspend already suspended user
+      operationId: suspendUser
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: User ID to suspend
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 10
+                  description: Reason for suspension
+      responses:
+        "200":
+          description: User suspended successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Cannot suspend self, another admin, or already suspended user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /users/{user_id}/reinstate:
+    post:
+      tags: [Users]
+      summary: Reinstate suspended user (v0.4.0)
+      description: |
+        Reinstate a suspended user's permissions. Previous roles become active again.
+        Requires workspace_admin role.
+      operationId: reinstateUser
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: User ID to reinstate
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: Optional reason for reinstatement
+      responses:
+        "200":
+          description: User reinstated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          description: User is not currently suspended
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ============================================================================
+  # TWO-PERSON APPROVAL (v0.4.0)
+  # ============================================================================
+
+  /approvals:
+    get:
+      tags: [Approvals]
+      summary: List pending approvals (v0.4.0)
+      description: |
+        List pending two-person approval requests.
+        Facilitators can see requests they can approve (not their own).
+      operationId: listApprovals
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, approved, expired, cancelled]
+          description: Filter by status
+      responses:
+        "200":
+          description: List of approval requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TwoPersonApproval"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      tags: [Approvals]
+      summary: Request two-person approval (v0.4.0)
+      description: |
+        Request approval from a second facilitator for a high-stakes operation.
+        The request expires after the configured timeout (default 24 hours).
+      operationId: requestApproval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [candidate_id, override_type, justification]
+              properties:
+                candidate_id:
+                  type: string
+                  format: objectid
+                  description: COP candidate requiring approval
+                override_type:
+                  type: string
+                  enum: [high_stakes_publish, conflict_override, risk_tier_downgrade]
+                  description: Type of override being requested
+                justification:
+                  type: string
+                  minLength: 10
+                  description: Detailed justification for the override
+      responses:
+        "201":
+          description: Approval request created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoPersonApprovalResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Pending approval already exists for this candidate/override
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /approvals/{approval_id}:
+    get:
+      tags: [Approvals]
+      summary: Get approval details (v0.4.0)
+      description: Get details of a specific approval request.
+      operationId: getApproval
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      responses:
+        "200":
+          description: Approval request details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoPersonApprovalResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /approvals/{approval_id}/approve:
+    post:
+      tags: [Approvals]
+      summary: Approve request (v0.4.0)
+      description: |
+        Approve a pending two-person approval request.
+        The approver must be different from the requester.
+      operationId: approveRequest
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      responses:
+        "200":
+          description: Request approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoPersonApprovalResponse"
+        "400":
+          description: Request is not pending or has expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Cannot approve your own request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1178,6 +1436,98 @@ components:
           $ref: "#/components/schemas/User"
 
     # ========================================================================
+    # TWO-PERSON APPROVAL SCHEMAS (v0.4.0)
+    # ========================================================================
+
+    TwoPersonApprovalStatus:
+      type: string
+      enum:
+        - pending
+        - approved
+        - expired
+        - cancelled
+      description: |
+        Approval status:
+        - pending: Awaiting second approver
+        - approved: Second approver granted approval
+        - expired: Request expired without approval (default 24 hours)
+        - cancelled: Requester cancelled the request
+
+    TwoPersonApprovalOverrideType:
+      type: string
+      enum:
+        - high_stakes_publish
+        - conflict_override
+        - risk_tier_downgrade
+      description: |
+        Type of high-stakes operation requiring two-person approval:
+        - high_stakes_publish: Publishing high-stakes candidate without full verification
+        - conflict_override: Overriding an unresolved conflict
+        - risk_tier_downgrade: Downgrading risk tier from high_stakes
+
+    TwoPersonApproval:
+      type: object
+      required:
+        - id
+        - candidate_id
+        - override_type
+        - requester_id
+        - justification
+        - status
+        - expires_at
+        - created_at
+      properties:
+        id:
+          type: string
+          format: objectid
+        candidate_id:
+          type: string
+          format: objectid
+          description: COP candidate this approval applies to
+        override_type:
+          $ref: "#/components/schemas/TwoPersonApprovalOverrideType"
+        requester_id:
+          type: string
+          format: objectid
+          description: User who initiated the approval request
+        requester_name:
+          type: string
+          description: Display name of requester
+        justification:
+          type: string
+          minLength: 10
+          description: Detailed justification for the override
+        status:
+          $ref: "#/components/schemas/TwoPersonApprovalStatus"
+        approver_id:
+          type: string
+          format: objectid
+          description: User who approved (if status is approved)
+        approver_name:
+          type: string
+          description: Display name of approver
+        second_approval_at:
+          type: string
+          format: date-time
+          description: When the second approval was granted
+        expires_at:
+          type: string
+          format: date-time
+          description: When the pending request expires
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TwoPersonApprovalResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/TwoPersonApproval"
+
+    # ========================================================================
     # CLUSTER SCHEMAS
     # ========================================================================
 
@@ -2065,6 +2415,12 @@ components:
         request_id:
           type: string
           description: Request ID for tracking and support
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          $ref: "#/components/schemas/Error"
 
   responses:
     BadRequest:
