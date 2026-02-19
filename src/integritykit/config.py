@@ -144,6 +144,20 @@ class Settings(BaseSettings):
         description="Slack channel ID for abuse alerts (optional)",
     )
 
+    # Security settings (S7-8)
+    cors_allowed_origins: str = Field(
+        default="",
+        description="Comma-separated list of allowed CORS origins (empty = no CORS)",
+    )
+    rate_limit_requests_per_minute: int = Field(
+        default=60,
+        description="Maximum API requests per minute per user",
+    )
+    rate_limit_enabled: bool = Field(
+        default=True,
+        description="Enable API rate limiting",
+    )
+
     @property
     def monitored_channels_list(self) -> Optional[list[str]]:
         """Parse monitored channels from comma-separated string.

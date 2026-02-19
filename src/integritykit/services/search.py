@@ -4,6 +4,7 @@ Implements:
 - FR-SEARCH-001: Searchable index with keyword, time range, channel filters
 """
 
+import re
 from datetime import datetime
 from typing import Any, Optional
 
@@ -19,6 +20,18 @@ from integritykit.services.database import (
     SignalRepository,
     get_collection,
 )
+
+
+def escape_regex(query: str) -> str:
+    """Escape special regex characters to prevent ReDoS attacks.
+
+    Args:
+        query: User-provided search query
+
+    Returns:
+        Escaped query safe for use in MongoDB $regex
+    """
+    return re.escape(query)
 
 
 class SearchResult:
@@ -319,7 +332,8 @@ class SearchService:
 
         if query:
             # Search in topic and summary using regex (text index may not exist)
-            query_regex = {"$regex": query, "$options": "i"}
+            # Escape special chars to prevent ReDoS attacks (S7-8)
+            query_regex = {"$regex": escape_regex(query), "$options": "i"}
             match_query["$or"] = [
                 {"topic": query_regex},
                 {"summary": query_regex},
@@ -541,7 +555,8 @@ class SearchService:
         }
 
         if query:
-            query_regex = {"$regex": query, "$options": "i"}
+            # Escape special chars to prevent ReDoS attacks (S7-8)
+            query_regex = {"$regex": escape_regex(query), "$options": "i"}
             match_query["$or"] = [
                 {"topic": query_regex},
                 {"summary": query_regex},

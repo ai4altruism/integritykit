@@ -516,45 +516,52 @@ docker run -d \
 
 ### Docker Compose
 
-Create `docker-compose.yml`:
+A complete `docker-compose.yml` is included for local development with MongoDB, ChromaDB, and optional Mongo Express for database management.
 
-```yaml
-version: '3.8'
+1. Copy `.env.example` to `.env` and fill in your values:
 
-services:
-  mongodb:
-    image: mongo:7.0
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
-
-  chromadb:
-    image: chromadb/chroma:latest
-    ports:
-      - "8000:8000"
-    volumes:
-      - chromadb_data:/chroma/chroma
-
-  integritykit:
-    build: .
-    ports:
-      - "8080:8080"
-    env_file: .env
-    depends_on:
-      - mongodb
-      - chromadb
-
-volumes:
-  mongodb_data:
-  chromadb_data:
+```bash
+cp .env.example .env
+# Edit .env with your Slack and OpenAI credentials
 ```
 
-Run the stack:
+2. Start the full stack:
 
 ```bash
 docker-compose up -d
 ```
+
+3. Optionally, include Mongo Express for database management:
+
+```bash
+docker-compose --profile tools up -d
+# Access Mongo Express at http://localhost:8081
+```
+
+Services:
+- **App**: http://localhost:8000 - Main API and dashboard
+- **MongoDB**: localhost:27017 - Document database
+- **ChromaDB**: localhost:8001 - Vector database for embeddings
+- **Mongo Express** (optional): http://localhost:8081 - Database UI
+
+### Security Configuration
+
+IntegrityKit includes several security hardening features (v0.4.0+):
+
+| Feature | Environment Variable | Default | Description |
+|---------|---------------------|---------|-------------|
+| CORS | `CORS_ALLOWED_ORIGINS` | (empty) | Comma-separated list of allowed origins |
+| Rate Limiting | `RATE_LIMIT_ENABLED` | `true` | Enable API rate limiting |
+| Rate Limit | `RATE_LIMIT_REQUESTS_PER_MINUTE` | `60` | Max requests per minute per user |
+| Two-Person Rule | `TWO_PERSON_RULE_ENABLED` | `true` | Require second approver for high-stakes |
+| Abuse Detection | `ABUSE_DETECTION_ENABLED` | `true` | Alert on rapid-fire overrides |
+
+Security headers included by default:
+- `X-Frame-Options: DENY` - Clickjacking protection
+- `X-Content-Type-Options: nosniff` - MIME type sniffing prevention
+- `X-XSS-Protection: 1; mode=block` - XSS protection
+- `Content-Security-Policy` - CSP for dashboard
+- `Referrer-Policy: strict-origin-when-cross-origin`
 
 ### Environment-Specific Configuration
 
@@ -566,6 +573,8 @@ For production deployments:
 4. Configure log aggregation (Datadog, CloudWatch)
 5. Set up monitoring and alerting
 6. Enable backup and disaster recovery
+7. Configure `CORS_ALLOWED_ORIGINS` for your frontend domains
+8. Review and adjust rate limiting based on expected traffic
 
 ## Documentation
 
@@ -633,20 +642,27 @@ This project is funded by [funding source] and developed in partnership with cri
 - ✅ RBAC and role-based permissions
 - ✅ Facilitator search
 
-### Pilot (In Progress)
-- Risk tier classification and publish gates
-- Duplicate merge workflow
-- Delta summaries between COP versions
-- Clarification request integration with Slack
-- Metrics and instrumentation
-- Redaction rules for sensitive information
+### Pilot (Complete)
+- ✅ Risk tier classification and publish gates
+- ✅ Duplicate merge workflow
+- ✅ Delta summaries between COP versions
+- ✅ Clarification request integration with Slack
+- ✅ Metrics dashboard with visualizations
+- ✅ Exportable metrics for post-exercise evaluation
+
+### v0.4.0 - Hardening & Release (Complete)
+- ✅ **Two-person rule for high-stakes overrides** - Requires second approver for critical operations
+- ✅ **COP update versioning** - Full version history with diff tracking
+- ✅ **Anti-abuse detection** - Alerts for rapid-fire override patterns
+- ✅ **User suspension system** - Admin can suspend facilitator permissions
+- ✅ **Data retention TTL** - Configurable retention with automatic purge
+- ✅ **Security hardening** - CORS, rate limiting, security headers, ReDoS protection
+- ✅ **Docker Compose** - Complete local development stack
 
 ### v1.0 (Planned)
-- Two-person rule for high-stakes overrides
-- Data retention policies
-- Anti-abuse detection
-- Exportable metrics for post-exercise evaluation
 - Multi-language support (Spanish, French)
+- Advanced analytics and reporting
+- External system integrations
 
 ## Changelog
 
