@@ -1,0 +1,119 @@
+version: "3.9"
+
+# IntegrityKit Docker Compose for local development
+# Usage: docker-compose up -d
+
+services:
+  # Main application service
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: integritykit-app
+    ports:
+      - "8000:8000"
+    environment:
+      # MongoDB connection
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=integritykit
+
+      # ChromaDB connection
+      - CHROMADB_HOST=chromadb
+      - CHROMADB_PORT=8000
+
+      # Slack (set these in .env for local development)
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-xoxb-placeholder}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-placeholder}
+      - SLACK_WORKSPACE_ID=${SLACK_WORKSPACE_ID:-T123456}
+
+      # OpenAI (set in .env)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-placeholder}
+
+      # Application settings
+      - DEBUG=${DEBUG:-false}
+      - DEFAULT_RETENTION_DAYS=${DEFAULT_RETENTION_DAYS:-90}
+      - TWO_PERSON_RULE_ENABLED=${TWO_PERSON_RULE_ENABLED:-true}
+      - ABUSE_DETECTION_ENABLED=${ABUSE_DETECTION_ENABLED:-true}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - integritykit-network
+    restart: unless-stopped
+
+  # MongoDB database
+  mongodb:
+    image: mongo:7.0
+    container_name: integritykit-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+    environment:
+      - MONGO_INITDB_DATABASE=integritykit
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - integritykit-network
+    restart: unless-stopped
+
+  # ChromaDB vector database for embeddings
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: integritykit-chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    networks:
+      - integritykit-network
+    restart: unless-stopped
+
+  # MongoDB Express for database management (optional)
+  mongo-express:
+    image: mongo-express:1.0
+    container_name: integritykit-mongo-express
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_PORT=27017
+      - ME_CONFIG_BASICAUTH_USERNAME=${MONGO_EXPRESS_USER:-admin}
+      - ME_CONFIG_BASICAUTH_PASSWORD=${MONGO_EXPRESS_PASSWORD:-admin}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - integritykit-network
+    profiles:
+      - tools
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongodb_config:
+    driver: local
+  chromadb_data:
+    driver: local
+
+networks:
+  integritykit-network:
+    driver: bridge
