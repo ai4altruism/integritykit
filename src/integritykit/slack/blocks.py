@@ -191,7 +191,7 @@ def build_readiness_summary_blocks(
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"*Risk Tier:* {risk_icon} {candidate.risk_tier.value.replace('_', ' ').title()}",
+            "text": f"*Risk Tier:* {risk_icon} {candidate.risk_tier.replace('_', ' ').title()}",
         },
     })
 
@@ -407,7 +407,7 @@ def build_candidate_detail_blocks(
             },
             {
                 "type": "mrkdwn",
-                "text": f"*Risk Tier:*\n{candidate.risk_tier.value.replace('_', ' ').title()}",
+                "text": f"*Risk Tier:*\n{candidate.risk_tier.replace('_', ' ').title()}",
             },
             {
                 "type": "mrkdwn",
@@ -555,7 +555,7 @@ def build_candidate_list_item_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"{state_icon} *{what_preview}*\n{risk_icon} {candidate.risk_tier.value.replace('_', ' ').title()} | :memo: {len(candidate.verifications)} verifications",
+                "text": f"{state_icon} *{what_preview}*\n{risk_icon} {candidate.risk_tier.replace('_', ' ').title()} | :memo: {len(candidate.verifications)} verifications",
             },
             "accessory": {
                 "type": "button",
