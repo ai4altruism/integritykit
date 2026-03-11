@@ -282,3 +282,79 @@ class TopicTrendsResponse(BaseModel):
         default_factory=dict,
         description="Summary statistics (total_topics, emerging_count, etc.)",
     )
+
+
+class FacilitatorWorkload(BaseModel):
+    """Facilitator workload metrics for a single facilitator.
+
+    Tracks performance and workload distribution metrics for workload
+    balancing and training needs identification.
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    user_id: str = Field(
+        ...,
+        description="Facilitator user ID",
+    )
+    user_name: str | None = Field(
+        default=None,
+        description="Facilitator display name",
+    )
+    total_actions: int = Field(
+        ...,
+        description="Total actions performed in time range",
+    )
+    actions_by_type: dict[str, int] = Field(
+        default_factory=dict,
+        description="Breakdown by action type (promote, verify, publish, merge, etc.)",
+    )
+    average_time_per_candidate_hours: float = Field(
+        default=0.0,
+        description="Average time from first to last action on candidates (hours)",
+    )
+    candidates_processed: int = Field(
+        default=0,
+        description="Number of unique candidates touched",
+    )
+    conflict_resolution_rate: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Ratio of conflicts resolved to conflicts encountered",
+    )
+    high_stakes_override_count: int = Field(
+        default=0,
+        description="Number of high-stakes approval overrides performed",
+    )
+    workload_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Normalized workload indicator relative to team average (0=light, 1=heavy)",
+    )
+
+
+class FacilitatorWorkloadResponse(BaseModel):
+    """Response containing facilitator workload analytics."""
+
+    workspace_id: str = Field(
+        ...,
+        description="Slack workspace ID",
+    )
+    start_date: datetime = Field(
+        ...,
+        description="Start date of analysis period",
+    )
+    end_date: datetime = Field(
+        ...,
+        description="End date of analysis period",
+    )
+    facilitators: list[FacilitatorWorkload] = Field(
+        default_factory=list,
+        description="Workload metrics by facilitator",
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Summary statistics (total_facilitators, total_actions, avg_actions, etc.)",
+    )

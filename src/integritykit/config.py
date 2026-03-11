@@ -214,6 +214,16 @@ class Settings(BaseSettings):
         description="Exponential backoff multiplier for retries",
     )
 
+    # Export settings (S8-18, S8-19, FR-INT-002)
+    cap_sender_id: str = Field(
+        default="integritykit@aidarena.org",
+        description="Sender identifier for CAP exports (email or OID)",
+    )
+    edxl_sender_id: str = Field(
+        default="integritykit@aidarena.org",
+        description="Sender identifier for EDXL-DE exports",
+    )
+
     @property
     def monitored_channels_list(self) -> Optional[list[str]]:
         """Parse monitored channels from comma-separated string.

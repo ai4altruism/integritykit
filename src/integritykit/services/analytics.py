@@ -6,13 +6,15 @@ Implements:
 """
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from integritykit.models.analytics import (
     FacilitatorActionDataPoint,
+    FacilitatorWorkload,
+    FacilitatorWorkloadResponse,
     Granularity,
     ReadinessTransitionDataPoint,
     SignalVolumeDataPoint,
@@ -37,6 +39,7 @@ class AnalyticsService:
         candidates_collection: Optional[AsyncIOMotorCollection] = None,
         audit_log_collection: Optional[AsyncIOMotorCollection] = None,
         clusters_collection: Optional[AsyncIOMotorCollection] = None,
+        users_collection: Optional[AsyncIOMotorCollection] = None,
         max_time_range_days: int = 90,
         retention_days: int = 365,
     ):
@@ -47,6 +50,7 @@ class AnalyticsService:
             candidates_collection: COP candidates collection (optional)
             audit_log_collection: Audit log collection (optional)
             clusters_collection: Clusters collection (optional)
+            users_collection: Users collection (optional)
             max_time_range_days: Maximum time range for queries (default: 90)
             retention_days: Analytics data retention period (default: 365)
         """
@@ -54,6 +58,7 @@ class AnalyticsService:
         self.candidates = candidates_collection or get_collection("cop_candidates")
         self.audit_log = audit_log_collection or get_collection("audit_log")
         self.clusters = clusters_collection or get_collection("clusters")
+        self.users = users_collection or get_collection("users")
         self.max_time_range_days = max_time_range_days
         self.retention_days = retention_days
 
@@ -805,6 +810,379 @@ class AnalyticsService:
 
         # Stable - within ±20%
         return TrendDirection.STABLE
+
+    async def compute_facilitator_workload(
+        self,
+        workspace_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        facilitator_id: Optional[str] = None,
+        include_inactive: bool = False,
+    ) -> FacilitatorWorkloadResponse:
+        """Compute facilitator workload analytics.
+
+        Analyzes facilitator performance and workload distribution metrics including:
+        - Total actions by facilitator
+        - Average time per candidate
+        - Actions by type breakdown
+        - Conflict resolution rate
+        - High-stakes override frequency
+        - Normalized workload score
+
+        Args:
+            workspace_id: Slack workspace ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+            facilitator_id: Filter by specific facilitator (optional)
+            include_inactive: Include facilitators with zero actions (default: False)
+
+        Returns:
+            FacilitatorWorkloadResponse with workload metrics
+
+        Raises:
+            ValueError: If time range exceeds maximum
+        """
+        # Validate time range
+        time_range = (end_date - start_date).days
+        if time_range > self.max_time_range_days:
+            raise ValueError(
+                f"Time range ({time_range} days) exceeds maximum "
+                f"({self.max_time_range_days} days)"
+            )
+
+        # Facilitator action types to track
+        facilitator_actions = [
+            AuditActionType.COP_CANDIDATE_PROMOTE.value,
+            AuditActionType.COP_CANDIDATE_UPDATE_STATE.value,
+            AuditActionType.COP_CANDIDATE_UPDATE_RISK_TIER.value,
+            AuditActionType.COP_CANDIDATE_VERIFY.value,
+            AuditActionType.COP_CANDIDATE_MERGE.value,
+            AuditActionType.COP_UPDATE_PUBLISH.value,
+            AuditActionType.COP_UPDATE_OVERRIDE.value,
+        ]
+
+        # Build match stage
+        match_stage = {
+            "action_type": {"$in": facilitator_actions},
+            "actor_role": {"$in": ["facilitator", "workspace_admin"]},
+            "timestamp": {"$gte": start_date, "$lte": end_date},
+        }
+
+        if facilitator_id:
+            match_stage["actor_id"] = facilitator_id
+
+        # Aggregation pipeline to compute workload metrics
+        pipeline = [
+            {"$match": match_stage},
+            {
+                "$group": {
+                    "_id": "$actor_id",
+                    "total_actions": {"$sum": 1},
+                    "actions_by_type": {
+                        "$push": "$action_type",
+                    },
+                    "candidates": {
+                        "$addToSet": "$target_id",
+                    },
+                    "timestamps": {
+                        "$push": "$timestamp",
+                    },
+                    "high_stakes_overrides": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$eq": [
+                                        "$action_type",
+                                        AuditActionType.COP_UPDATE_OVERRIDE.value,
+                                    ]
+                                },
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                }
+            },
+        ]
+
+        facilitators_data = []
+        total_actions_all = 0
+        action_counts = []
+
+        async for doc in self.audit_log.aggregate(pipeline):
+            actor_id = str(doc["_id"])
+            total_actions = doc["total_actions"]
+            total_actions_all += total_actions
+            action_counts.append(total_actions)
+
+            # Count actions by type
+            actions_by_type: dict[str, int] = {}
+            for action_type in doc.get("actions_by_type", []):
+                # Map action types to simplified names
+                simplified_name = self._simplify_action_type(action_type)
+                actions_by_type[simplified_name] = (
+                    actions_by_type.get(simplified_name, 0) + 1
+                )
+
+            # Calculate candidates processed
+            candidates_processed = len(doc.get("candidates", []))
+
+            # Calculate average time per candidate
+            # Get all actions grouped by candidate
+            avg_time_hours = await self._calculate_avg_time_per_candidate(
+                actor_id=actor_id,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            # Calculate conflict resolution rate
+            conflict_resolution_rate = await self._calculate_conflict_resolution_rate(
+                actor_id=actor_id,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            # Get user name
+            user_name = await self._get_user_name(actor_id)
+
+            facilitators_data.append(
+                {
+                    "user_id": actor_id,
+                    "user_name": user_name,
+                    "total_actions": total_actions,
+                    "actions_by_type": actions_by_type,
+                    "average_time_per_candidate_hours": avg_time_hours,
+                    "candidates_processed": candidates_processed,
+                    "conflict_resolution_rate": conflict_resolution_rate,
+                    "high_stakes_override_count": doc.get("high_stakes_overrides", 0),
+                }
+            )
+
+        # Calculate workload scores (normalized by team average)
+        if facilitators_data:
+            avg_actions = total_actions_all / len(facilitators_data)
+            max_actions = max(action_counts) if action_counts else 1
+
+            for facilitator in facilitators_data:
+                # Workload score: normalized by max actions in team
+                # 0.0 = no actions, 1.0 = highest workload
+                if max_actions > 0:
+                    facilitator["workload_score"] = round(
+                        facilitator["total_actions"] / max_actions, 3
+                    )
+                else:
+                    facilitator["workload_score"] = 0.0
+
+        # Create FacilitatorWorkload models
+        facilitators = [FacilitatorWorkload(**f) for f in facilitators_data]
+
+        # Sort by total actions (descending)
+        facilitators.sort(key=lambda f: f.total_actions, reverse=True)
+
+        # Filter inactive if needed
+        if not include_inactive:
+            facilitators = [f for f in facilitators if f.total_actions > 0]
+
+        # Calculate summary statistics
+        summary = self._calculate_workload_summary(
+            facilitators=facilitators,
+            total_actions=total_actions_all,
+        )
+
+        logger.info(
+            "Computed facilitator workload analytics",
+            workspace_id=workspace_id,
+            facilitators_count=len(facilitators),
+            total_actions=total_actions_all,
+        )
+
+        return FacilitatorWorkloadResponse(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            facilitators=facilitators,
+            summary=summary,
+        )
+
+    def _simplify_action_type(self, action_type: str) -> str:
+        """Simplify action type to user-friendly name.
+
+        Args:
+            action_type: Full action type enum value
+
+        Returns:
+            Simplified action type name
+        """
+        mapping = {
+            AuditActionType.COP_CANDIDATE_PROMOTE.value: "promote",
+            AuditActionType.COP_CANDIDATE_UPDATE_STATE.value: "update_state",
+            AuditActionType.COP_CANDIDATE_UPDATE_RISK_TIER.value: "update_risk",
+            AuditActionType.COP_CANDIDATE_VERIFY.value: "verify",
+            AuditActionType.COP_CANDIDATE_MERGE.value: "merge",
+            AuditActionType.COP_UPDATE_PUBLISH.value: "publish",
+            AuditActionType.COP_UPDATE_OVERRIDE.value: "override",
+        }
+        return mapping.get(action_type, action_type)
+
+    async def _get_user_name(self, user_id: str) -> str | None:
+        """Get user display name from users collection.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            User display name or None
+        """
+        try:
+            user_doc = await self.users.find_one({"_id": user_id})
+            if user_doc:
+                return user_doc.get("name") or user_doc.get("display_name")
+        except Exception as e:
+            logger.warning("Failed to get user name", user_id=user_id, error=str(e))
+        return None
+
+    async def _calculate_avg_time_per_candidate(
+        self,
+        actor_id: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> float:
+        """Calculate average time from first to last action on candidates.
+
+        Args:
+            actor_id: Facilitator user ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+
+        Returns:
+            Average time in hours
+        """
+        # Aggregation to get min/max timestamp per candidate
+        pipeline = [
+            {
+                "$match": {
+                    "actor_id": actor_id,
+                    "timestamp": {"$gte": start_date, "$lte": end_date},
+                    "target_type": "cop_candidate",
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$target_id",
+                    "first_action": {"$min": "$timestamp"},
+                    "last_action": {"$max": "$timestamp"},
+                }
+            },
+            {
+                "$project": {
+                    "duration_seconds": {
+                        "$divide": [
+                            {"$subtract": ["$last_action", "$first_action"]},
+                            1000,  # Convert milliseconds to seconds
+                        ]
+                    }
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "avg_duration_seconds": {"$avg": "$duration_seconds"},
+                }
+            },
+        ]
+
+        result = None
+        async for doc in self.audit_log.aggregate(pipeline):
+            result = doc
+
+        if result and result.get("avg_duration_seconds"):
+            # Convert seconds to hours
+            return round(result["avg_duration_seconds"] / 3600, 2)
+
+        return 0.0
+
+    async def _calculate_conflict_resolution_rate(
+        self,
+        actor_id: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> float:
+        """Calculate conflict resolution rate for facilitator.
+
+        Ratio of conflicts resolved to conflicts encountered.
+
+        Args:
+            actor_id: Facilitator user ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+
+        Returns:
+            Conflict resolution rate (0.0 - 1.0)
+        """
+        # Count candidates with conflicts that this facilitator touched
+        # For now, return placeholder until conflict tracking is implemented
+        # TODO: Implement when conflict detection metadata is available
+        return 0.0
+
+    def _calculate_workload_summary(
+        self,
+        facilitators: list[FacilitatorWorkload],
+        total_actions: int,
+    ) -> dict[str, Any]:
+        """Calculate summary statistics for workload response.
+
+        Args:
+            facilitators: List of facilitator workload data
+            total_actions: Total actions across all facilitators
+
+        Returns:
+            Summary statistics dict
+        """
+        if not facilitators:
+            return {
+                "total_facilitators": 0,
+                "total_actions": 0,
+                "average_actions_per_facilitator": 0.0,
+                "workload_distribution": {
+                    "min": 0,
+                    "max": 0,
+                    "median": 0.0,
+                    "std_dev": 0.0,
+                },
+            }
+
+        action_counts = [f.total_actions for f in facilitators]
+        avg_actions = total_actions / len(facilitators)
+
+        # Calculate median
+        sorted_actions = sorted(action_counts)
+        n = len(sorted_actions)
+        if n % 2 == 0:
+            median = (sorted_actions[n // 2 - 1] + sorted_actions[n // 2]) / 2
+        else:
+            median = sorted_actions[n // 2]
+
+        # Calculate standard deviation
+        variance = sum((x - avg_actions) ** 2 for x in action_counts) / len(
+            action_counts
+        )
+        std_dev = variance**0.5
+
+        # Find most active facilitator
+        most_active = max(facilitators, key=lambda f: f.total_actions)
+
+        return {
+            "total_facilitators": len(facilitators),
+            "total_actions": total_actions,
+            "average_actions_per_facilitator": round(avg_actions, 2),
+            "most_active_facilitator": most_active.user_name or most_active.user_id,
+            "workload_distribution": {
+                "min": min(action_counts),
+                "max": max(action_counts),
+                "median": round(median, 2),
+                "std_dev": round(std_dev, 2),
+            },
+        }
 
 
 # Global service instance

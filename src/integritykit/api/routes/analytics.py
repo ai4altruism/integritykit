@@ -15,6 +15,7 @@ from integritykit.api.dependencies import (
     RequireViewMetrics,
 )
 from integritykit.models.analytics import (
+    FacilitatorWorkloadResponse,
     Granularity,
     MetricType,
     TimeSeriesAnalyticsRequest,
@@ -402,4 +403,107 @@ async def get_topic_trends(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to compute topic trends",
+        )
+
+
+@router.get("/facilitator-workload", response_model=FacilitatorWorkloadResponse)
+async def get_facilitator_workload(
+    user: CurrentUser,
+    _: None = RequireViewMetrics,
+    workspace_id: str = Query(..., description="Slack workspace ID"),
+    start_date: datetime = Query(
+        ...,
+        description="Start of time range for analysis",
+    ),
+    end_date: datetime = Query(
+        ...,
+        description="End of time range for analysis",
+    ),
+    facilitator_id: str | None = Query(
+        default=None,
+        description="Filter by specific facilitator (default: all)",
+    ),
+    include_inactive: bool = Query(
+        default=False,
+        description="Include facilitators with zero actions in time range",
+    ),
+    analytics_service: AnalyticsService = Depends(get_analytics_service_dependency),
+) -> FacilitatorWorkloadResponse:
+    """Get facilitator workload analytics.
+
+    Analyzes facilitator performance and workload distribution metrics including:
+    - Total actions by facilitator
+    - Average time per candidate
+    - Actions by type (promote, verify, publish, merge, etc.)
+    - Readiness state transition velocity
+    - Conflict resolution rate
+    - High-stakes override frequency
+
+    Useful for:
+    - Workload balancing
+    - Training needs identification
+    - Performance benchmarking
+    - Bottleneck detection
+
+    Requires facilitator or workspace_admin role.
+
+    Args:
+        user: Current authenticated user
+        workspace_id: Slack workspace ID
+        start_date: Start of time range
+        end_date: End of time range
+        facilitator_id: Filter by specific facilitator (optional)
+        include_inactive: Include facilitators with zero actions
+        analytics_service: Analytics service
+
+    Returns:
+        FacilitatorWorkloadResponse with workload metrics
+
+    Raises:
+        HTTPException: If time range is invalid or exceeds maximum
+    """
+    now = datetime.utcnow()
+
+    # Validate date range
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be before end_date",
+        )
+
+    # Validate that end_date is not in the future
+    if end_date > now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date cannot be in the future",
+        )
+
+    try:
+        response = await analytics_service.compute_facilitator_workload(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            facilitator_id=facilitator_id,
+            include_inactive=include_inactive,
+        )
+        return response
+    except ValueError as e:
+        logger.warning(
+            "Invalid facilitator workload request",
+            workspace_id=workspace_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to compute facilitator workload",
+            workspace_id=workspace_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to compute facilitator workload analytics",
         )

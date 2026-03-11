@@ -16,6 +16,7 @@ from bson import ObjectId
 
 from integritykit.models.analytics import (
     FacilitatorActionDataPoint,
+    FacilitatorWorkload,
     Granularity,
     MetricType,
     ReadinessTransitionDataPoint,
@@ -37,17 +38,19 @@ class TestAnalyticsService:
         candidates = MagicMock()
         audit_log = MagicMock()
         clusters = MagicMock()
-        return signals, candidates, audit_log, clusters
+        users = MagicMock()
+        return signals, candidates, audit_log, clusters, users
 
     @pytest.fixture
     def analytics_service(self, mock_collections):
         """Create AnalyticsService with mocked collections."""
-        signals, candidates, audit_log, clusters = mock_collections
+        signals, candidates, audit_log, clusters, users = mock_collections
         return AnalyticsService(
             signals_collection=signals,
             candidates_collection=candidates,
             audit_log_collection=audit_log,
             clusters_collection=clusters,
+            users_collection=users,
             max_time_range_days=90,
             retention_days=365,
         )
@@ -94,7 +97,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test signal volume computation with no data."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         # Mock empty aggregation result
         async def mock_aggregate(*args, **kwargs):
@@ -134,7 +137,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test signal volume computation with mock data."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         # Mock aggregation result
         mock_data = [
@@ -193,7 +196,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test readiness transitions with no clusters."""
-        _, _, _, clusters = mock_collections
+        _, _, _, clusters, _ = mock_collections
 
         class AsyncIterator:
             def __init__(self, items):
@@ -228,7 +231,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test readiness transitions computation with mock data."""
-        _, _, audit_log, clusters = mock_collections
+        _, _, audit_log, clusters, _ = mock_collections
 
         # Mock clusters
         class AsyncIterator:
@@ -286,7 +289,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test facilitator actions computation with mock data."""
-        _, _, audit_log, _ = mock_collections
+        _, _, audit_log, _, _ = mock_collections
 
         # Mock audit log aggregation
         mock_actions = [
@@ -344,7 +347,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test facilitator action velocity calculation for hourly granularity."""
-        _, _, audit_log, _ = mock_collections
+        _, _, audit_log, _, _ = mock_collections
 
         mock_actions = [
             {
@@ -390,7 +393,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test filtering facilitator actions by specific user."""
-        _, _, audit_log, _ = mock_collections
+        _, _, audit_log, _, _ = mock_collections
 
         mock_actions = [
             {
@@ -442,7 +445,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test computing multiple metrics in single query."""
-        signals, _, audit_log, clusters = mock_collections
+        signals, _, audit_log, clusters, _ = mock_collections
 
         # Setup mocks for all metric types
         class AsyncIterator:
@@ -518,7 +521,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test summary statistics computation."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         class AsyncIterator:
             def __init__(self, items):
@@ -554,6 +557,313 @@ class TestAnalyticsService:
         assert result.summary["total_signals"] == 33  # 10 + 15 + 8
         assert result.summary["avg_signals_per_bucket"] == 11.0  # 33 / 3
         assert result.summary["time_range_days"] == 2
+
+    @pytest.mark.asyncio
+    async def test_compute_facilitator_workload_empty(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test facilitator workload computation with no data."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+
+        # Mock empty aggregation result
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        audit_log.aggregate.return_value = AsyncIterator([])
+
+        result = await analytics_service.compute_facilitator_workload(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 7),
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.facilitators) == 0
+        assert result.summary["total_facilitators"] == 0
+        assert result.summary["total_actions"] == 0
+        audit_log.aggregate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_compute_facilitator_workload_with_data(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test facilitator workload computation with mock data."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+
+        # Helper class
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        # Mock aggregation result
+        mock_data = [
+            {
+                "_id": "user123",
+                "total_actions": 25,
+                "actions_by_type": [
+                    "cop_candidate.promote",
+                    "cop_candidate.verify",
+                    "cop_candidate.promote",
+                    "cop_update.publish",
+                ],
+                "candidates": [
+                    ObjectId(),
+                    ObjectId(),
+                    ObjectId(),
+                ],
+                "timestamps": [
+                    datetime(2026, 3, 1, 10, 0, 0),
+                    datetime(2026, 3, 2, 14, 0, 0),
+                ],
+                "high_stakes_overrides": 2,
+            },
+            {
+                "_id": "user456",
+                "total_actions": 15,
+                "actions_by_type": [
+                    "cop_candidate.verify",
+                    "cop_candidate.merge",
+                ],
+                "candidates": [ObjectId()],
+                "timestamps": [
+                    datetime(2026, 3, 3, 10, 0, 0),
+                ],
+                "high_stakes_overrides": 0,
+            },
+        ]
+
+        # Set up mock responses
+        call_count = [0]
+
+        def get_aggregate_iterator(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: main aggregation
+                return AsyncIterator(mock_data)
+            else:
+                # Subsequent calls: avg time and conflict rate calculations
+                return AsyncIterator([])
+
+        audit_log.aggregate.side_effect = get_aggregate_iterator
+
+        # Mock users collection
+        async def mock_find_one(query):
+            if query.get("_id") == "user123":
+                return {"_id": "user123", "name": "John Doe"}
+            elif query.get("_id") == "user456":
+                return {"_id": "user456", "name": "Jane Smith"}
+            return None
+
+        analytics_service.users.find_one = AsyncMock(side_effect=mock_find_one)
+
+        result = await analytics_service.compute_facilitator_workload(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 7),
+        )
+
+        # Verify result structure
+        assert result.workspace_id == "W123"
+        assert len(result.facilitators) == 2
+
+        # Check facilitators are sorted by total_actions (descending)
+        assert result.facilitators[0].total_actions == 25
+        assert result.facilitators[1].total_actions == 15
+
+        # Check first facilitator details
+        facilitator1 = result.facilitators[0]
+        assert facilitator1.user_id == "user123"
+        assert facilitator1.user_name == "John Doe"
+        assert facilitator1.total_actions == 25
+        assert facilitator1.candidates_processed == 3
+        assert facilitator1.high_stakes_override_count == 2
+        assert 0.0 <= facilitator1.workload_score <= 1.0
+
+        # Check actions_by_type
+        assert "promote" in facilitator1.actions_by_type
+        assert "verify" in facilitator1.actions_by_type
+        assert "publish" in facilitator1.actions_by_type
+
+        # Check summary statistics
+        assert result.summary["total_facilitators"] == 2
+        assert result.summary["total_actions"] == 40
+        assert result.summary["average_actions_per_facilitator"] == 20.0
+        assert result.summary["most_active_facilitator"] == "John Doe"
+
+        # Check workload distribution
+        dist = result.summary["workload_distribution"]
+        assert dist["min"] == 15
+        assert dist["max"] == 25
+        assert dist["median"] == 20.0
+
+    @pytest.mark.asyncio
+    async def test_compute_facilitator_workload_filter_by_id(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test facilitator workload computation filtered by facilitator_id."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        mock_data = [
+            {
+                "_id": "user123",
+                "total_actions": 25,
+                "actions_by_type": ["cop_candidate.promote"],
+                "candidates": [ObjectId()],
+                "timestamps": [datetime(2026, 3, 1, 10, 0, 0)],
+                "high_stakes_overrides": 0,
+            },
+        ]
+
+        call_count = [0]
+
+        def get_aggregate_iterator(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return AsyncIterator(mock_data)
+            else:
+                return AsyncIterator([])
+
+        audit_log.aggregate.side_effect = get_aggregate_iterator
+        analytics_service.users.find_one = AsyncMock(return_value=None)
+
+        result = await analytics_service.compute_facilitator_workload(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 7),
+            facilitator_id="user123",
+        )
+
+        assert len(result.facilitators) == 1
+        assert result.facilitators[0].user_id == "user123"
+
+        # Verify match stage included facilitator_id filter
+        call_args = audit_log.aggregate.call_args_list[0]
+        pipeline = call_args[0][0]
+        assert pipeline[0]["$match"]["actor_id"] == "user123"
+
+    @pytest.mark.asyncio
+    async def test_compute_facilitator_workload_time_range_validation(
+        self,
+        analytics_service,
+    ):
+        """Test time range validation for facilitator workload."""
+        # Test time range exceeds maximum
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            await analytics_service.compute_facilitator_workload(
+                workspace_id="W123",
+                start_date=datetime(2026, 1, 1),
+                end_date=datetime(2026, 6, 1),  # 151 days, exceeds 90 day max
+            )
+
+    def test_simplify_action_type(self, analytics_service):
+        """Test action type simplification."""
+        assert (
+            analytics_service._simplify_action_type("cop_candidate.promote")
+            == "promote"
+        )
+        assert (
+            analytics_service._simplify_action_type("cop_candidate.verify") == "verify"
+        )
+        assert (
+            analytics_service._simplify_action_type("cop_update.publish") == "publish"
+        )
+        assert (
+            analytics_service._simplify_action_type("cop_update.override")
+            == "override"
+        )
+
+    def test_calculate_workload_summary_empty(self, analytics_service):
+        """Test workload summary calculation with no facilitators."""
+        summary = analytics_service._calculate_workload_summary(
+            facilitators=[],
+            total_actions=0,
+        )
+
+        assert summary["total_facilitators"] == 0
+        assert summary["total_actions"] == 0
+        assert summary["average_actions_per_facilitator"] == 0.0
+        assert summary["workload_distribution"]["min"] == 0
+        assert summary["workload_distribution"]["max"] == 0
+
+    def test_calculate_workload_summary_with_data(self, analytics_service):
+        """Test workload summary calculation with facilitator data."""
+        facilitators = [
+            FacilitatorWorkload(
+                user_id="user1",
+                user_name="User 1",
+                total_actions=30,
+                actions_by_type={},
+            ),
+            FacilitatorWorkload(
+                user_id="user2",
+                user_name="User 2",
+                total_actions=20,
+                actions_by_type={},
+            ),
+            FacilitatorWorkload(
+                user_id="user3",
+                user_name="User 3",
+                total_actions=10,
+                actions_by_type={},
+            ),
+        ]
+
+        summary = analytics_service._calculate_workload_summary(
+            facilitators=facilitators,
+            total_actions=60,
+        )
+
+        assert summary["total_facilitators"] == 3
+        assert summary["total_actions"] == 60
+        assert summary["average_actions_per_facilitator"] == 20.0
+        assert summary["most_active_facilitator"] == "User 1"
+        assert summary["workload_distribution"]["min"] == 10
+        assert summary["workload_distribution"]["max"] == 30
+        assert summary["workload_distribution"]["median"] == 20.0
 
 
 class TestAnalyticsModels:
@@ -650,17 +960,19 @@ class TestTopicTrendAnalytics:
         candidates = MagicMock()
         audit_log = MagicMock()
         clusters = MagicMock()
-        return signals, candidates, audit_log, clusters
+        users = MagicMock()
+        return signals, candidates, audit_log, clusters, users
 
     @pytest.fixture
     def analytics_service(self, mock_collections):
         """Create AnalyticsService with mocked collections."""
-        signals, candidates, audit_log, clusters = mock_collections
+        signals, candidates, audit_log, clusters, users = mock_collections
         return AnalyticsService(
             signals_collection=signals,
             candidates_collection=candidates,
             audit_log_collection=audit_log,
             clusters_collection=clusters,
+            users_collection=users,
             max_time_range_days=90,
             retention_days=365,
         )
@@ -727,7 +1039,7 @@ class TestTopicTrendAnalytics:
         mock_collections,
     ):
         """Test topic trends computation with no data."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         class AsyncIterator:
             def __init__(self, items):
@@ -765,7 +1077,7 @@ class TestTopicTrendAnalytics:
         mock_collections,
     ):
         """Test topic trends computation with mock data."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         # Mock aggregation result with trending topics
         mock_data = [
@@ -870,7 +1182,7 @@ class TestTopicTrendAnalytics:
         mock_collections,
     ):
         """Test filtering trends by direction."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         mock_data = [
             {
@@ -938,7 +1250,7 @@ class TestTopicTrendAnalytics:
         mock_collections,
     ):
         """Test filtering trends by topic type."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         mock_data = [
             {
@@ -1006,7 +1318,7 @@ class TestTopicTrendAnalytics:
         mock_collections,
     ):
         """Test minimum signals filter."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         # This should be filtered out by the pipeline's $match on min_signals
         mock_data = [
