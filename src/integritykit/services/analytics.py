@@ -6,18 +6,25 @@ Implements:
 """
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from integritykit.models.analytics import (
+    ConflictResolutionMetricsResponse,
+    ConflictResolutionStats,
     FacilitatorActionDataPoint,
+    FacilitatorWorkload,
+    FacilitatorWorkloadResponse,
     Granularity,
     ReadinessTransitionDataPoint,
     SignalVolumeDataPoint,
     TimeSeriesAnalyticsRequest,
     TimeSeriesAnalyticsResponse,
+    TopicTrend,
+    TopicTrendsResponse,
+    TrendDirection,
 )
 from integritykit.models.audit import AuditActionType
 from integritykit.services.database import get_collection
@@ -34,6 +41,7 @@ class AnalyticsService:
         candidates_collection: Optional[AsyncIOMotorCollection] = None,
         audit_log_collection: Optional[AsyncIOMotorCollection] = None,
         clusters_collection: Optional[AsyncIOMotorCollection] = None,
+        users_collection: Optional[AsyncIOMotorCollection] = None,
         max_time_range_days: int = 90,
         retention_days: int = 365,
     ):
@@ -44,6 +52,7 @@ class AnalyticsService:
             candidates_collection: COP candidates collection (optional)
             audit_log_collection: Audit log collection (optional)
             clusters_collection: Clusters collection (optional)
+            users_collection: Users collection (optional)
             max_time_range_days: Maximum time range for queries (default: 90)
             retention_days: Analytics data retention period (default: 365)
         """
@@ -51,6 +60,7 @@ class AnalyticsService:
         self.candidates = candidates_collection or get_collection("cop_candidates")
         self.audit_log = audit_log_collection or get_collection("audit_log")
         self.clusters = clusters_collection or get_collection("clusters")
+        self.users = users_collection or get_collection("users")
         self.max_time_range_days = max_time_range_days
         self.retention_days = retention_days
 
@@ -520,6 +530,896 @@ class AnalyticsService:
         )
 
         return response
+
+    async def compute_topic_trends(
+        self,
+        workspace_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        min_signals: int = 5,
+        direction_filter: str | None = None,
+        topic_type_filter: str | None = None,
+    ) -> TopicTrendsResponse:
+        """Compute topic trend analysis using cluster data.
+
+        Analyzes cluster data to identify emerging, declining, stable, new, and peaked topics.
+        Uses volume changes over time to classify trend directions.
+
+        Trend classification:
+        - emerging: >20% increase in signal volume
+        - declining: >20% decrease in signal volume
+        - stable: within ±20% volume change
+        - new: first appeared in time range
+        - peaked: reached maximum volume and now declining
+
+        Args:
+            workspace_id: Slack workspace ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+            min_signals: Minimum signal count for topic to be included (default: 5)
+            direction_filter: Filter by trend direction (optional)
+            topic_type_filter: Filter by topic type (optional)
+
+        Returns:
+            TopicTrendsResponse with detected trends and summary
+
+        Raises:
+            ValueError: If time range exceeds maximum
+        """
+        # Validate time range
+        time_range = (end_date - start_date).days
+        if time_range > self.max_time_range_days:
+            raise ValueError(
+                f"Time range ({time_range} days) exceeds maximum "
+                f"({self.max_time_range_days} days)"
+            )
+
+        # Calculate period boundaries for comparison
+        # Split time range into current and previous periods
+        period_duration = end_date - start_date
+        period_midpoint = start_date + (period_duration / 2)
+
+        # Build aggregation pipeline to group signals by cluster and time period
+        match_stage = {
+            "slack_workspace_id": workspace_id,
+            "created_at": {"$gte": start_date, "$lte": end_date},
+        }
+
+        # Get all clusters for this workspace with their signal counts over time
+        pipeline = [
+            {"$match": match_stage},
+            # Lookup cluster information
+            {
+                "$lookup": {
+                    "from": "clusters",
+                    "localField": "cluster_id",
+                    "foreignField": "_id",
+                    "as": "cluster_info",
+                }
+            },
+            {"$unwind": "$cluster_info"},
+            # Group by cluster and time period (current vs previous half)
+            {
+                "$group": {
+                    "_id": {
+                        "cluster_id": "$cluster_info._id",
+                        "topic": "$cluster_info.topic",
+                        "topic_type": "$cluster_info.incident_type",
+                        "period": {
+                            "$cond": [
+                                {"$lt": ["$created_at", period_midpoint]},
+                                "previous",
+                                "current",
+                            ]
+                        },
+                    },
+                    "signal_count": {"$sum": 1},
+                    "first_seen": {"$min": "$created_at"},
+                    "last_seen": {"$max": "$created_at"},
+                    "keywords": {"$addToSet": "$cluster_info.topic"},
+                }
+            },
+            # Group again by cluster to get both period counts
+            {
+                "$group": {
+                    "_id": {
+                        "cluster_id": "$_id.cluster_id",
+                        "topic": "$_id.topic",
+                        "topic_type": "$_id.topic_type",
+                    },
+                    "periods": {
+                        "$push": {
+                            "period": "$_id.period",
+                            "count": "$signal_count",
+                            "first_seen": "$first_seen",
+                            "last_seen": "$last_seen",
+                        }
+                    },
+                    "total_signals": {"$sum": "$signal_count"},
+                    "keywords": {"$first": "$keywords"},
+                }
+            },
+            # Filter by minimum signals
+            {"$match": {"total_signals": {"$gte": min_signals}}},
+            {"$sort": {"total_signals": -1}},
+        ]
+
+        trends: list[TopicTrend] = []
+        peak_volumes: dict[str, tuple[datetime, int]] = {}
+
+        # Execute aggregation
+        async for doc in self.signals.aggregate(pipeline):
+            cluster_id = str(doc["_id"]["cluster_id"])
+            topic = doc["_id"]["topic"] or "Unknown Topic"
+            topic_type = doc["_id"]["topic_type"] or "general"
+            total_signals = doc["total_signals"]
+
+            # Parse period data
+            previous_count = 0
+            current_count = 0
+            first_seen = start_date
+            last_seen = end_date
+
+            for period_data in doc["periods"]:
+                if period_data["period"] == "previous":
+                    previous_count = period_data["count"]
+                    first_seen = period_data["first_seen"]
+                elif period_data["period"] == "current":
+                    current_count = period_data["count"]
+                    last_seen = period_data["last_seen"]
+
+            # Calculate volume change percentage
+            if previous_count > 0:
+                volume_change_pct = (
+                    (current_count - previous_count) / previous_count
+                ) * 100
+            elif current_count > 0:
+                # New topic - no previous period data
+                volume_change_pct = 100.0
+            else:
+                volume_change_pct = 0.0
+
+            # Classify trend direction
+            direction = self._classify_trend_direction(
+                previous_count=previous_count,
+                current_count=current_count,
+                volume_change_pct=volume_change_pct,
+                first_seen=first_seen,
+                start_date=start_date,
+            )
+
+            # Calculate velocity score (0.0 - 1.0)
+            velocity_score = min(abs(volume_change_pct) / 100.0, 1.0)
+
+            # Determine peak time and volume by bucketing signals
+            # For now, use the midpoint as peak if current > previous, otherwise use start
+            peak_time = None
+            peak_volume = max(previous_count, current_count)
+            if current_count > previous_count:
+                peak_time = period_midpoint
+            elif previous_count > 0:
+                peak_time = start_date
+
+            # Apply filters
+            if direction_filter and direction_filter != "all":
+                if direction.value != direction_filter:
+                    continue
+
+            if topic_type_filter and topic_type != topic_type_filter:
+                continue
+
+            # Extract keywords from cluster topic
+            keywords = [topic] + (doc.get("keywords", []))
+            keywords = list(set(keywords))[:5]  # Limit to 5 unique keywords
+
+            trend = TopicTrend(
+                topic=topic,
+                topic_type=topic_type,
+                direction=direction,
+                signal_count=total_signals,
+                volume_change_pct=round(volume_change_pct, 2),
+                first_seen=first_seen,
+                peak_time=peak_time,
+                peak_volume=peak_volume,
+                keywords=keywords,
+                related_clusters=[cluster_id],
+                velocity_score=round(velocity_score, 3),
+            )
+
+            trends.append(trend)
+
+        # Calculate summary statistics
+        summary = {
+            "total_topics": len(trends),
+            "emerging_count": sum(
+                1 for t in trends if t.direction == TrendDirection.EMERGING
+            ),
+            "declining_count": sum(
+                1 for t in trends if t.direction == TrendDirection.DECLINING
+            ),
+            "stable_count": sum(
+                1 for t in trends if t.direction == TrendDirection.STABLE
+            ),
+            "new_topics_count": sum(
+                1 for t in trends if t.direction == TrendDirection.NEW
+            ),
+            "peaked_count": sum(
+                1 for t in trends if t.direction == TrendDirection.PEAKED
+            ),
+        }
+
+        if trends:
+            most_active = max(trends, key=lambda t: t.signal_count)
+            summary["most_active_topic"] = most_active.topic
+            summary["most_active_signal_count"] = most_active.signal_count
+
+        logger.info(
+            "Computed topic trends",
+            workspace_id=workspace_id,
+            trends_count=len(trends),
+            emerging=summary["emerging_count"],
+            declining=summary["declining_count"],
+            new=summary["new_topics_count"],
+        )
+
+        return TopicTrendsResponse(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            trends=trends,
+            summary=summary,
+        )
+
+    def _classify_trend_direction(
+        self,
+        previous_count: int,
+        current_count: int,
+        volume_change_pct: float,
+        first_seen: datetime,
+        start_date: datetime,
+    ) -> TrendDirection:
+        """Classify trend direction based on volume changes.
+
+        Args:
+            previous_count: Signal count in previous period
+            current_count: Signal count in current period
+            volume_change_pct: Percentage change in volume
+            first_seen: First signal timestamp
+            start_date: Analysis start date
+
+        Returns:
+            TrendDirection classification
+        """
+        # New topic - first appeared in time range
+        if previous_count == 0 and current_count > 0:
+            return TrendDirection.NEW
+
+        # Peaked - had activity before, declining now
+        if previous_count > current_count and previous_count > 0:
+            # If significant decline, mark as peaked
+            if volume_change_pct < -20:
+                return TrendDirection.PEAKED
+            # Minor decline, still stable
+            return TrendDirection.STABLE
+
+        # Emerging - significant increase
+        if volume_change_pct > 20:
+            return TrendDirection.EMERGING
+
+        # Declining - significant decrease
+        if volume_change_pct < -20:
+            return TrendDirection.DECLINING
+
+        # Stable - within ±20%
+        return TrendDirection.STABLE
+
+    async def compute_facilitator_workload(
+        self,
+        workspace_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        facilitator_id: Optional[str] = None,
+        include_inactive: bool = False,
+    ) -> FacilitatorWorkloadResponse:
+        """Compute facilitator workload analytics.
+
+        Analyzes facilitator performance and workload distribution metrics including:
+        - Total actions by facilitator
+        - Average time per candidate
+        - Actions by type breakdown
+        - Conflict resolution rate
+        - High-stakes override frequency
+        - Normalized workload score
+
+        Args:
+            workspace_id: Slack workspace ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+            facilitator_id: Filter by specific facilitator (optional)
+            include_inactive: Include facilitators with zero actions (default: False)
+
+        Returns:
+            FacilitatorWorkloadResponse with workload metrics
+
+        Raises:
+            ValueError: If time range exceeds maximum
+        """
+        # Validate time range
+        time_range = (end_date - start_date).days
+        if time_range > self.max_time_range_days:
+            raise ValueError(
+                f"Time range ({time_range} days) exceeds maximum "
+                f"({self.max_time_range_days} days)"
+            )
+
+        # Facilitator action types to track
+        facilitator_actions = [
+            AuditActionType.COP_CANDIDATE_PROMOTE.value,
+            AuditActionType.COP_CANDIDATE_UPDATE_STATE.value,
+            AuditActionType.COP_CANDIDATE_UPDATE_RISK_TIER.value,
+            AuditActionType.COP_CANDIDATE_VERIFY.value,
+            AuditActionType.COP_CANDIDATE_MERGE.value,
+            AuditActionType.COP_UPDATE_PUBLISH.value,
+            AuditActionType.COP_UPDATE_OVERRIDE.value,
+        ]
+
+        # Build match stage
+        match_stage = {
+            "action_type": {"$in": facilitator_actions},
+            "actor_role": {"$in": ["facilitator", "workspace_admin"]},
+            "timestamp": {"$gte": start_date, "$lte": end_date},
+        }
+
+        if facilitator_id:
+            match_stage["actor_id"] = facilitator_id
+
+        # Aggregation pipeline to compute workload metrics
+        pipeline = [
+            {"$match": match_stage},
+            {
+                "$group": {
+                    "_id": "$actor_id",
+                    "total_actions": {"$sum": 1},
+                    "actions_by_type": {
+                        "$push": "$action_type",
+                    },
+                    "candidates": {
+                        "$addToSet": "$target_id",
+                    },
+                    "timestamps": {
+                        "$push": "$timestamp",
+                    },
+                    "high_stakes_overrides": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$eq": [
+                                        "$action_type",
+                                        AuditActionType.COP_UPDATE_OVERRIDE.value,
+                                    ]
+                                },
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                }
+            },
+        ]
+
+        facilitators_data = []
+        total_actions_all = 0
+        action_counts = []
+
+        async for doc in self.audit_log.aggregate(pipeline):
+            actor_id = str(doc["_id"])
+            total_actions = doc["total_actions"]
+            total_actions_all += total_actions
+            action_counts.append(total_actions)
+
+            # Count actions by type
+            actions_by_type: dict[str, int] = {}
+            for action_type in doc.get("actions_by_type", []):
+                # Map action types to simplified names
+                simplified_name = self._simplify_action_type(action_type)
+                actions_by_type[simplified_name] = (
+                    actions_by_type.get(simplified_name, 0) + 1
+                )
+
+            # Calculate candidates processed
+            candidates_processed = len(doc.get("candidates", []))
+
+            # Calculate average time per candidate
+            # Get all actions grouped by candidate
+            avg_time_hours = await self._calculate_avg_time_per_candidate(
+                actor_id=actor_id,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            # Calculate conflict resolution rate
+            conflict_resolution_rate = await self._calculate_conflict_resolution_rate(
+                actor_id=actor_id,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            # Get user name
+            user_name = await self._get_user_name(actor_id)
+
+            facilitators_data.append(
+                {
+                    "user_id": actor_id,
+                    "user_name": user_name,
+                    "total_actions": total_actions,
+                    "actions_by_type": actions_by_type,
+                    "average_time_per_candidate_hours": avg_time_hours,
+                    "candidates_processed": candidates_processed,
+                    "conflict_resolution_rate": conflict_resolution_rate,
+                    "high_stakes_override_count": doc.get("high_stakes_overrides", 0),
+                }
+            )
+
+        # Calculate workload scores (normalized by team average)
+        if facilitators_data:
+            avg_actions = total_actions_all / len(facilitators_data)
+            max_actions = max(action_counts) if action_counts else 1
+
+            for facilitator in facilitators_data:
+                # Workload score: normalized by max actions in team
+                # 0.0 = no actions, 1.0 = highest workload
+                if max_actions > 0:
+                    facilitator["workload_score"] = round(
+                        facilitator["total_actions"] / max_actions, 3
+                    )
+                else:
+                    facilitator["workload_score"] = 0.0
+
+        # Create FacilitatorWorkload models
+        facilitators = [FacilitatorWorkload(**f) for f in facilitators_data]
+
+        # Sort by total actions (descending)
+        facilitators.sort(key=lambda f: f.total_actions, reverse=True)
+
+        # Filter inactive if needed
+        if not include_inactive:
+            facilitators = [f for f in facilitators if f.total_actions > 0]
+
+        # Calculate summary statistics
+        summary = self._calculate_workload_summary(
+            facilitators=facilitators,
+            total_actions=total_actions_all,
+        )
+
+        logger.info(
+            "Computed facilitator workload analytics",
+            workspace_id=workspace_id,
+            facilitators_count=len(facilitators),
+            total_actions=total_actions_all,
+        )
+
+        return FacilitatorWorkloadResponse(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            facilitators=facilitators,
+            summary=summary,
+        )
+
+    async def compute_conflict_resolution_metrics(
+        self,
+        workspace_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        risk_tier: Optional[str] = None,
+        resolved_only: bool = False,
+    ) -> ConflictResolutionMetricsResponse:
+        """Compute conflict resolution time analysis metrics (S8-12).
+
+        Analyzes conflict detection and resolution patterns including:
+        - Resolution times from detection to resolution
+        - Resolution rates by risk tier
+        - Resolution method distribution
+        - Time statistics (avg, median, min, max)
+
+        Conflicts are stored in clusters.conflicts array with detected_at and
+        resolved_at timestamps. Risk tier is determined from associated COP candidate.
+
+        Args:
+            workspace_id: Slack workspace ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+            risk_tier: Filter by risk tier (routine, elevated, high_stakes) - optional
+            resolved_only: Only include resolved conflicts (default: False)
+
+        Returns:
+            ConflictResolutionMetricsResponse with resolution metrics by risk tier
+
+        Raises:
+            ValueError: If time range exceeds maximum
+        """
+        # Validate time range
+        time_range = (end_date - start_date).days
+        if time_range > self.max_time_range_days:
+            raise ValueError(
+                f"Time range ({time_range} days) exceeds maximum "
+                f"({self.max_time_range_days} days)"
+            )
+
+        # Build aggregation pipeline to analyze conflicts
+        # We need to:
+        # 1. Find all clusters in workspace with conflicts in date range
+        # 2. Unwind conflicts array to process each conflict
+        # 3. Join with cop_candidates to get risk_tier
+        # 4. Calculate resolution times
+        # 5. Group by risk_tier
+
+        match_stage = {
+            "slack_workspace_id": workspace_id,
+            "conflicts": {"$exists": True, "$ne": []},
+        }
+
+        pipeline = [
+            {"$match": match_stage},
+            # Unwind conflicts array to process each conflict
+            {"$unwind": "$conflicts"},
+            # Filter conflicts by date range
+            {
+                "$match": {
+                    "conflicts.detected_at": {"$gte": start_date, "$lte": end_date},
+                }
+            },
+            # Filter by resolved status if needed
+            *([{"$match": {"conflicts.resolved": True}}] if resolved_only else []),
+            # Lookup associated COP candidate to get risk tier
+            {
+                "$lookup": {
+                    "from": "cop_candidates",
+                    "localField": "cop_candidate_id",
+                    "foreignField": "_id",
+                    "as": "candidate_info",
+                }
+            },
+            # Project fields we need
+            {
+                "$project": {
+                    "conflict_id": "$conflicts.id",
+                    "detected_at": "$conflicts.detected_at",
+                    "resolved": "$conflicts.resolved",
+                    "resolved_at": "$conflicts.resolved_at",
+                    "resolution_type": "$conflicts.resolution.type",
+                    "risk_tier": {
+                        "$ifNull": [
+                            {"$arrayElemAt": ["$candidate_info.risk_tier", 0]},
+                            "routine",  # Default to routine if no candidate
+                        ]
+                    },
+                    "resolution_time_hours": {
+                        "$cond": [
+                            {"$and": ["$conflicts.resolved", "$conflicts.resolved_at"]},
+                            {
+                                "$divide": [
+                                    {
+                                        "$subtract": [
+                                            "$conflicts.resolved_at",
+                                            "$conflicts.detected_at",
+                                        ]
+                                    },
+                                    3600000,  # Convert milliseconds to hours
+                                ]
+                            },
+                            None,
+                        ]
+                    },
+                }
+            },
+            # Filter by risk tier if specified
+            *(
+                [{"$match": {"risk_tier": risk_tier}}]
+                if risk_tier
+                else []
+            ),
+            # Group by risk tier
+            {
+                "$group": {
+                    "_id": "$risk_tier",
+                    "total_conflicts": {"$sum": 1},
+                    "resolved_conflicts": {
+                        "$sum": {"$cond": ["$resolved", 1, 0]}
+                    },
+                    "resolution_times": {
+                        "$push": {
+                            "$cond": ["$resolution_time_hours", "$resolution_time_hours", None]
+                        }
+                    },
+                    "resolution_types": {
+                        "$push": {
+                            "$cond": ["$resolution_type", "$resolution_type", None]
+                        }
+                    },
+                }
+            },
+            {"$sort": {"_id": 1}},
+        ]
+
+        stats_by_tier: list[ConflictResolutionStats] = []
+        total_conflicts = 0
+        total_resolved = 0
+
+        async for doc in self.clusters.aggregate(pipeline):
+            tier = doc["_id"]
+            total = doc["total_conflicts"]
+            resolved = doc["resolved_conflicts"]
+            total_conflicts += total
+            total_resolved += resolved
+
+            # Calculate resolution rate
+            resolution_rate = resolved / total if total > 0 else 0.0
+
+            # Filter out None values from resolution times
+            resolution_times = [
+                t for t in doc.get("resolution_times", []) if t is not None
+            ]
+
+            # Calculate time statistics
+            if resolution_times:
+                avg_time = sum(resolution_times) / len(resolution_times)
+                sorted_times = sorted(resolution_times)
+                n = len(sorted_times)
+                if n % 2 == 0:
+                    median_time = (sorted_times[n // 2 - 1] + sorted_times[n // 2]) / 2
+                else:
+                    median_time = sorted_times[n // 2]
+                min_time = min(resolution_times)
+                max_time = max(resolution_times)
+            else:
+                avg_time = 0.0
+                median_time = 0.0
+                min_time = 0.0
+                max_time = 0.0
+
+            # Count resolution methods
+            resolution_methods: dict[str, int] = {}
+            for method in doc.get("resolution_types", []):
+                if method:
+                    resolution_methods[method] = resolution_methods.get(method, 0) + 1
+
+            stats = ConflictResolutionStats(
+                risk_tier=tier,
+                total_conflicts=total,
+                resolved_conflicts=resolved,
+                resolution_rate=round(resolution_rate, 3),
+                avg_resolution_time_hours=round(avg_time, 2),
+                median_resolution_time_hours=round(median_time, 2),
+                min_resolution_time_hours=round(min_time, 2),
+                max_resolution_time_hours=round(max_time, 2),
+                resolution_methods=resolution_methods,
+            )
+            stats_by_tier.append(stats)
+
+        # Calculate summary statistics
+        overall_resolution_rate = (
+            total_resolved / total_conflicts if total_conflicts > 0 else 0.0
+        )
+
+        # Calculate overall average resolution time
+        all_times = []
+        for stat in stats_by_tier:
+            if stat.resolved_conflicts > 0:
+                # Weight by number of resolved conflicts
+                all_times.extend([stat.avg_resolution_time_hours] * stat.resolved_conflicts)
+
+        overall_avg_time = sum(all_times) / len(all_times) if all_times else 0.0
+
+        # Aggregate resolution methods across all tiers
+        all_methods: dict[str, int] = {}
+        for stat in stats_by_tier:
+            for method, count in stat.resolution_methods.items():
+                all_methods[method] = all_methods.get(method, 0) + count
+
+        summary = {
+            "total_conflicts": total_conflicts,
+            "total_resolved": total_resolved,
+            "overall_resolution_rate": round(overall_resolution_rate, 3),
+            "overall_avg_resolution_time_hours": round(overall_avg_time, 2),
+            "resolution_methods": all_methods,
+        }
+
+        logger.info(
+            "Computed conflict resolution metrics",
+            workspace_id=workspace_id,
+            total_conflicts=total_conflicts,
+            total_resolved=total_resolved,
+            resolution_rate=overall_resolution_rate,
+        )
+
+        return ConflictResolutionMetricsResponse(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            by_risk_tier=stats_by_tier,
+            summary=summary,
+        )
+
+    def _simplify_action_type(self, action_type: str) -> str:
+        """Simplify action type to user-friendly name.
+
+        Args:
+            action_type: Full action type enum value
+
+        Returns:
+            Simplified action type name
+        """
+        mapping = {
+            AuditActionType.COP_CANDIDATE_PROMOTE.value: "promote",
+            AuditActionType.COP_CANDIDATE_UPDATE_STATE.value: "update_state",
+            AuditActionType.COP_CANDIDATE_UPDATE_RISK_TIER.value: "update_risk",
+            AuditActionType.COP_CANDIDATE_VERIFY.value: "verify",
+            AuditActionType.COP_CANDIDATE_MERGE.value: "merge",
+            AuditActionType.COP_UPDATE_PUBLISH.value: "publish",
+            AuditActionType.COP_UPDATE_OVERRIDE.value: "override",
+        }
+        return mapping.get(action_type, action_type)
+
+    async def _get_user_name(self, user_id: str) -> str | None:
+        """Get user display name from users collection.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            User display name or None
+        """
+        try:
+            user_doc = await self.users.find_one({"_id": user_id})
+            if user_doc:
+                return user_doc.get("name") or user_doc.get("display_name")
+        except Exception as e:
+            logger.warning("Failed to get user name", user_id=user_id, error=str(e))
+        return None
+
+    async def _calculate_avg_time_per_candidate(
+        self,
+        actor_id: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> float:
+        """Calculate average time from first to last action on candidates.
+
+        Args:
+            actor_id: Facilitator user ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+
+        Returns:
+            Average time in hours
+        """
+        # Aggregation to get min/max timestamp per candidate
+        pipeline = [
+            {
+                "$match": {
+                    "actor_id": actor_id,
+                    "timestamp": {"$gte": start_date, "$lte": end_date},
+                    "target_type": "cop_candidate",
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$target_id",
+                    "first_action": {"$min": "$timestamp"},
+                    "last_action": {"$max": "$timestamp"},
+                }
+            },
+            {
+                "$project": {
+                    "duration_seconds": {
+                        "$divide": [
+                            {"$subtract": ["$last_action", "$first_action"]},
+                            1000,  # Convert milliseconds to seconds
+                        ]
+                    }
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "avg_duration_seconds": {"$avg": "$duration_seconds"},
+                }
+            },
+        ]
+
+        result = None
+        async for doc in self.audit_log.aggregate(pipeline):
+            result = doc
+
+        if result and result.get("avg_duration_seconds"):
+            # Convert seconds to hours
+            return round(result["avg_duration_seconds"] / 3600, 2)
+
+        return 0.0
+
+    async def _calculate_conflict_resolution_rate(
+        self,
+        actor_id: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> float:
+        """Calculate conflict resolution rate for facilitator.
+
+        Ratio of conflicts resolved to conflicts encountered.
+
+        Args:
+            actor_id: Facilitator user ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+
+        Returns:
+            Conflict resolution rate (0.0 - 1.0)
+        """
+        # Count candidates with conflicts that this facilitator touched
+        # For now, return placeholder until conflict tracking is implemented
+        # TODO: Implement when conflict detection metadata is available
+        return 0.0
+
+    def _calculate_workload_summary(
+        self,
+        facilitators: list[FacilitatorWorkload],
+        total_actions: int,
+    ) -> dict[str, Any]:
+        """Calculate summary statistics for workload response.
+
+        Args:
+            facilitators: List of facilitator workload data
+            total_actions: Total actions across all facilitators
+
+        Returns:
+            Summary statistics dict
+        """
+        if not facilitators:
+            return {
+                "total_facilitators": 0,
+                "total_actions": 0,
+                "average_actions_per_facilitator": 0.0,
+                "workload_distribution": {
+                    "min": 0,
+                    "max": 0,
+                    "median": 0.0,
+                    "std_dev": 0.0,
+                },
+            }
+
+        action_counts = [f.total_actions for f in facilitators]
+        avg_actions = total_actions / len(facilitators)
+
+        # Calculate median
+        sorted_actions = sorted(action_counts)
+        n = len(sorted_actions)
+        if n % 2 == 0:
+            median = (sorted_actions[n // 2 - 1] + sorted_actions[n // 2]) / 2
+        else:
+            median = sorted_actions[n // 2]
+
+        # Calculate standard deviation
+        variance = sum((x - avg_actions) ** 2 for x in action_counts) / len(
+            action_counts
+        )
+        std_dev = variance**0.5
+
+        # Find most active facilitator
+        most_active = max(facilitators, key=lambda f: f.total_actions)
+
+        return {
+            "total_facilitators": len(facilitators),
+            "total_actions": total_actions,
+            "average_actions_per_facilitator": round(avg_actions, 2),
+            "most_active_facilitator": most_active.user_name or most_active.user_id,
+            "workload_distribution": {
+                "min": min(action_counts),
+                "max": max(action_counts),
+                "median": round(median, 2),
+                "std_dev": round(std_dev, 2),
+            },
+        }
 
 
 # Global service instance

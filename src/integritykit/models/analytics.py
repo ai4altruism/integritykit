@@ -28,6 +28,16 @@ class MetricType(StrEnum):
     FACILITATOR_ACTIONS = "facilitator_actions"
 
 
+class TrendDirection(StrEnum):
+    """Trend direction indicators for topic analysis."""
+
+    EMERGING = "emerging"
+    DECLINING = "declining"
+    STABLE = "stable"
+    NEW = "new"
+    PEAKED = "peaked"
+
+
 class TimeSeriesDataPoint(BaseModel):
     """Single data point in a time-series."""
 
@@ -190,4 +200,235 @@ class AnalyticsAggregationConfig(BaseModel):
     cache_ttl_seconds: int = Field(
         default=300,
         description="Cache TTL for analytics queries",
+    )
+
+
+class TopicTrend(BaseModel):
+    """Topic trend analysis result.
+
+    Represents a topic identified through clustering with its trend characteristics.
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    topic: str = Field(
+        ...,
+        description="Topic name or keyword cluster",
+    )
+    topic_type: str = Field(
+        ...,
+        description="Type of topic (incident, need, resource_offer, etc.)",
+    )
+    direction: TrendDirection = Field(
+        ...,
+        description="Trend direction (emerging, declining, stable, new, peaked)",
+    )
+    signal_count: int = Field(
+        ...,
+        description="Total signals in this topic during time range",
+    )
+    volume_change_pct: float = Field(
+        ...,
+        description="Percentage change in signal volume (positive = increase)",
+    )
+    first_seen: datetime = Field(
+        ...,
+        description="First signal timestamp for this topic",
+    )
+    peak_time: datetime | None = Field(
+        default=None,
+        description="Timestamp of maximum signal volume",
+    )
+    peak_volume: int = Field(
+        default=0,
+        description="Maximum signals in a single time bucket",
+    )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Representative keywords for this topic",
+    )
+    related_clusters: list[str] = Field(
+        default_factory=list,
+        description="Cluster IDs associated with this topic",
+    )
+    velocity_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Rate of change indicator (0 = stable, 1 = rapid change)",
+    )
+
+
+class TopicTrendsResponse(BaseModel):
+    """Response containing topic trend analysis results."""
+
+    workspace_id: str = Field(
+        ...,
+        description="Slack workspace ID",
+    )
+    start_date: datetime = Field(
+        ...,
+        description="Start date of analysis period",
+    )
+    end_date: datetime = Field(
+        ...,
+        description="End date of analysis period",
+    )
+    trends: list[TopicTrend] = Field(
+        default_factory=list,
+        description="List of detected topic trends",
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Summary statistics (total_topics, emerging_count, etc.)",
+    )
+
+
+class FacilitatorWorkload(BaseModel):
+    """Facilitator workload metrics for a single facilitator.
+
+    Tracks performance and workload distribution metrics for workload
+    balancing and training needs identification.
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    user_id: str = Field(
+        ...,
+        description="Facilitator user ID",
+    )
+    user_name: str | None = Field(
+        default=None,
+        description="Facilitator display name",
+    )
+    total_actions: int = Field(
+        ...,
+        description="Total actions performed in time range",
+    )
+    actions_by_type: dict[str, int] = Field(
+        default_factory=dict,
+        description="Breakdown by action type (promote, verify, publish, merge, etc.)",
+    )
+    average_time_per_candidate_hours: float = Field(
+        default=0.0,
+        description="Average time from first to last action on candidates (hours)",
+    )
+    candidates_processed: int = Field(
+        default=0,
+        description="Number of unique candidates touched",
+    )
+    conflict_resolution_rate: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Ratio of conflicts resolved to conflicts encountered",
+    )
+    high_stakes_override_count: int = Field(
+        default=0,
+        description="Number of high-stakes approval overrides performed",
+    )
+    workload_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Normalized workload indicator relative to team average (0=light, 1=heavy)",
+    )
+
+
+class FacilitatorWorkloadResponse(BaseModel):
+    """Response containing facilitator workload analytics."""
+
+    workspace_id: str = Field(
+        ...,
+        description="Slack workspace ID",
+    )
+    start_date: datetime = Field(
+        ...,
+        description="Start date of analysis period",
+    )
+    end_date: datetime = Field(
+        ...,
+        description="End date of analysis period",
+    )
+    facilitators: list[FacilitatorWorkload] = Field(
+        default_factory=list,
+        description="Workload metrics by facilitator",
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Summary statistics (total_facilitators, total_actions, avg_actions, etc.)",
+    )
+
+
+class ConflictResolutionStats(BaseModel):
+    """Conflict resolution statistics for a risk tier.
+
+    Tracks resolution times and methods by risk tier for workload analysis
+    and process optimization (S8-12).
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    risk_tier: str = Field(
+        ...,
+        description="Risk tier (routine, elevated, high_stakes)",
+    )
+    total_conflicts: int = Field(
+        ...,
+        description="Total conflicts detected in this risk tier",
+    )
+    resolved_conflicts: int = Field(
+        ...,
+        description="Number of conflicts that have been resolved",
+    )
+    resolution_rate: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Ratio of resolved to total conflicts (0.0 - 1.0)",
+    )
+    avg_resolution_time_hours: float = Field(
+        ...,
+        description="Average time from detection to resolution (hours)",
+    )
+    median_resolution_time_hours: float = Field(
+        ...,
+        description="Median time from detection to resolution (hours)",
+    )
+    min_resolution_time_hours: float = Field(
+        ...,
+        description="Minimum time from detection to resolution (hours)",
+    )
+    max_resolution_time_hours: float = Field(
+        ...,
+        description="Maximum time from detection to resolution (hours)",
+    )
+    resolution_methods: dict[str, int] = Field(
+        default_factory=dict,
+        description="Count of resolutions by method (merged, one_correct, both_valid, deferred)",
+    )
+
+
+class ConflictResolutionMetricsResponse(BaseModel):
+    """Response containing conflict resolution time analysis metrics."""
+
+    workspace_id: str = Field(
+        ...,
+        description="Slack workspace ID",
+    )
+    start_date: datetime = Field(
+        ...,
+        description="Start date of analysis period",
+    )
+    end_date: datetime = Field(
+        ...,
+        description="End date of analysis period",
+    )
+    by_risk_tier: list[ConflictResolutionStats] = Field(
+        default_factory=list,
+        description="Conflict resolution stats grouped by risk tier",
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Summary statistics (total_conflicts, overall_resolution_rate, avg_time, etc.)",
     )

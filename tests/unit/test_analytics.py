@@ -15,12 +15,17 @@ import pytest
 from bson import ObjectId
 
 from integritykit.models.analytics import (
+    ConflictResolutionMetricsResponse,
+    ConflictResolutionStats,
     FacilitatorActionDataPoint,
+    FacilitatorWorkload,
     Granularity,
     MetricType,
     ReadinessTransitionDataPoint,
     SignalVolumeDataPoint,
     TimeSeriesAnalyticsRequest,
+    TopicTrend,
+    TrendDirection,
 )
 from integritykit.services.analytics import AnalyticsService
 
@@ -35,17 +40,19 @@ class TestAnalyticsService:
         candidates = MagicMock()
         audit_log = MagicMock()
         clusters = MagicMock()
-        return signals, candidates, audit_log, clusters
+        users = MagicMock()
+        return signals, candidates, audit_log, clusters, users
 
     @pytest.fixture
     def analytics_service(self, mock_collections):
         """Create AnalyticsService with mocked collections."""
-        signals, candidates, audit_log, clusters = mock_collections
+        signals, candidates, audit_log, clusters, users = mock_collections
         return AnalyticsService(
             signals_collection=signals,
             candidates_collection=candidates,
             audit_log_collection=audit_log,
             clusters_collection=clusters,
+            users_collection=users,
             max_time_range_days=90,
             retention_days=365,
         )
@@ -92,7 +99,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test signal volume computation with no data."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         # Mock empty aggregation result
         async def mock_aggregate(*args, **kwargs):
@@ -132,7 +139,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test signal volume computation with mock data."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         # Mock aggregation result
         mock_data = [
@@ -191,7 +198,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test readiness transitions with no clusters."""
-        _, _, _, clusters = mock_collections
+        _, _, _, clusters, _ = mock_collections
 
         class AsyncIterator:
             def __init__(self, items):
@@ -226,7 +233,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test readiness transitions computation with mock data."""
-        _, _, audit_log, clusters = mock_collections
+        _, _, audit_log, clusters, _ = mock_collections
 
         # Mock clusters
         class AsyncIterator:
@@ -284,7 +291,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test facilitator actions computation with mock data."""
-        _, _, audit_log, _ = mock_collections
+        _, _, audit_log, _, _ = mock_collections
 
         # Mock audit log aggregation
         mock_actions = [
@@ -342,7 +349,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test facilitator action velocity calculation for hourly granularity."""
-        _, _, audit_log, _ = mock_collections
+        _, _, audit_log, _, _ = mock_collections
 
         mock_actions = [
             {
@@ -388,7 +395,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test filtering facilitator actions by specific user."""
-        _, _, audit_log, _ = mock_collections
+        _, _, audit_log, _, _ = mock_collections
 
         mock_actions = [
             {
@@ -440,7 +447,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test computing multiple metrics in single query."""
-        signals, _, audit_log, clusters = mock_collections
+        signals, _, audit_log, clusters, _ = mock_collections
 
         # Setup mocks for all metric types
         class AsyncIterator:
@@ -516,7 +523,7 @@ class TestAnalyticsService:
         mock_collections,
     ):
         """Test summary statistics computation."""
-        signals, _, _, _ = mock_collections
+        signals, _, _, _, _ = mock_collections
 
         class AsyncIterator:
             def __init__(self, items):
@@ -552,6 +559,313 @@ class TestAnalyticsService:
         assert result.summary["total_signals"] == 33  # 10 + 15 + 8
         assert result.summary["avg_signals_per_bucket"] == 11.0  # 33 / 3
         assert result.summary["time_range_days"] == 2
+
+    @pytest.mark.asyncio
+    async def test_compute_facilitator_workload_empty(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test facilitator workload computation with no data."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+
+        # Mock empty aggregation result
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        audit_log.aggregate.return_value = AsyncIterator([])
+
+        result = await analytics_service.compute_facilitator_workload(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 7),
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.facilitators) == 0
+        assert result.summary["total_facilitators"] == 0
+        assert result.summary["total_actions"] == 0
+        audit_log.aggregate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_compute_facilitator_workload_with_data(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test facilitator workload computation with mock data."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+
+        # Helper class
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        # Mock aggregation result
+        mock_data = [
+            {
+                "_id": "user123",
+                "total_actions": 25,
+                "actions_by_type": [
+                    "cop_candidate.promote",
+                    "cop_candidate.verify",
+                    "cop_candidate.promote",
+                    "cop_update.publish",
+                ],
+                "candidates": [
+                    ObjectId(),
+                    ObjectId(),
+                    ObjectId(),
+                ],
+                "timestamps": [
+                    datetime(2026, 3, 1, 10, 0, 0),
+                    datetime(2026, 3, 2, 14, 0, 0),
+                ],
+                "high_stakes_overrides": 2,
+            },
+            {
+                "_id": "user456",
+                "total_actions": 15,
+                "actions_by_type": [
+                    "cop_candidate.verify",
+                    "cop_candidate.merge",
+                ],
+                "candidates": [ObjectId()],
+                "timestamps": [
+                    datetime(2026, 3, 3, 10, 0, 0),
+                ],
+                "high_stakes_overrides": 0,
+            },
+        ]
+
+        # Set up mock responses
+        call_count = [0]
+
+        def get_aggregate_iterator(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: main aggregation
+                return AsyncIterator(mock_data)
+            else:
+                # Subsequent calls: avg time and conflict rate calculations
+                return AsyncIterator([])
+
+        audit_log.aggregate.side_effect = get_aggregate_iterator
+
+        # Mock users collection
+        async def mock_find_one(query):
+            if query.get("_id") == "user123":
+                return {"_id": "user123", "name": "John Doe"}
+            elif query.get("_id") == "user456":
+                return {"_id": "user456", "name": "Jane Smith"}
+            return None
+
+        analytics_service.users.find_one = AsyncMock(side_effect=mock_find_one)
+
+        result = await analytics_service.compute_facilitator_workload(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 7),
+        )
+
+        # Verify result structure
+        assert result.workspace_id == "W123"
+        assert len(result.facilitators) == 2
+
+        # Check facilitators are sorted by total_actions (descending)
+        assert result.facilitators[0].total_actions == 25
+        assert result.facilitators[1].total_actions == 15
+
+        # Check first facilitator details
+        facilitator1 = result.facilitators[0]
+        assert facilitator1.user_id == "user123"
+        assert facilitator1.user_name == "John Doe"
+        assert facilitator1.total_actions == 25
+        assert facilitator1.candidates_processed == 3
+        assert facilitator1.high_stakes_override_count == 2
+        assert 0.0 <= facilitator1.workload_score <= 1.0
+
+        # Check actions_by_type
+        assert "promote" in facilitator1.actions_by_type
+        assert "verify" in facilitator1.actions_by_type
+        assert "publish" in facilitator1.actions_by_type
+
+        # Check summary statistics
+        assert result.summary["total_facilitators"] == 2
+        assert result.summary["total_actions"] == 40
+        assert result.summary["average_actions_per_facilitator"] == 20.0
+        assert result.summary["most_active_facilitator"] == "John Doe"
+
+        # Check workload distribution
+        dist = result.summary["workload_distribution"]
+        assert dist["min"] == 15
+        assert dist["max"] == 25
+        assert dist["median"] == 20.0
+
+    @pytest.mark.asyncio
+    async def test_compute_facilitator_workload_filter_by_id(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test facilitator workload computation filtered by facilitator_id."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        mock_data = [
+            {
+                "_id": "user123",
+                "total_actions": 25,
+                "actions_by_type": ["cop_candidate.promote"],
+                "candidates": [ObjectId()],
+                "timestamps": [datetime(2026, 3, 1, 10, 0, 0)],
+                "high_stakes_overrides": 0,
+            },
+        ]
+
+        call_count = [0]
+
+        def get_aggregate_iterator(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return AsyncIterator(mock_data)
+            else:
+                return AsyncIterator([])
+
+        audit_log.aggregate.side_effect = get_aggregate_iterator
+        analytics_service.users.find_one = AsyncMock(return_value=None)
+
+        result = await analytics_service.compute_facilitator_workload(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 7),
+            facilitator_id="user123",
+        )
+
+        assert len(result.facilitators) == 1
+        assert result.facilitators[0].user_id == "user123"
+
+        # Verify match stage included facilitator_id filter
+        call_args = audit_log.aggregate.call_args_list[0]
+        pipeline = call_args[0][0]
+        assert pipeline[0]["$match"]["actor_id"] == "user123"
+
+    @pytest.mark.asyncio
+    async def test_compute_facilitator_workload_time_range_validation(
+        self,
+        analytics_service,
+    ):
+        """Test time range validation for facilitator workload."""
+        # Test time range exceeds maximum
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            await analytics_service.compute_facilitator_workload(
+                workspace_id="W123",
+                start_date=datetime(2026, 1, 1),
+                end_date=datetime(2026, 6, 1),  # 151 days, exceeds 90 day max
+            )
+
+    def test_simplify_action_type(self, analytics_service):
+        """Test action type simplification."""
+        assert (
+            analytics_service._simplify_action_type("cop_candidate.promote")
+            == "promote"
+        )
+        assert (
+            analytics_service._simplify_action_type("cop_candidate.verify") == "verify"
+        )
+        assert (
+            analytics_service._simplify_action_type("cop_update.publish") == "publish"
+        )
+        assert (
+            analytics_service._simplify_action_type("cop_update.override")
+            == "override"
+        )
+
+    def test_calculate_workload_summary_empty(self, analytics_service):
+        """Test workload summary calculation with no facilitators."""
+        summary = analytics_service._calculate_workload_summary(
+            facilitators=[],
+            total_actions=0,
+        )
+
+        assert summary["total_facilitators"] == 0
+        assert summary["total_actions"] == 0
+        assert summary["average_actions_per_facilitator"] == 0.0
+        assert summary["workload_distribution"]["min"] == 0
+        assert summary["workload_distribution"]["max"] == 0
+
+    def test_calculate_workload_summary_with_data(self, analytics_service):
+        """Test workload summary calculation with facilitator data."""
+        facilitators = [
+            FacilitatorWorkload(
+                user_id="user1",
+                user_name="User 1",
+                total_actions=30,
+                actions_by_type={},
+            ),
+            FacilitatorWorkload(
+                user_id="user2",
+                user_name="User 2",
+                total_actions=20,
+                actions_by_type={},
+            ),
+            FacilitatorWorkload(
+                user_id="user3",
+                user_name="User 3",
+                total_actions=10,
+                actions_by_type={},
+            ),
+        ]
+
+        summary = analytics_service._calculate_workload_summary(
+            facilitators=facilitators,
+            total_actions=60,
+        )
+
+        assert summary["total_facilitators"] == 3
+        assert summary["total_actions"] == 60
+        assert summary["average_actions_per_facilitator"] == 20.0
+        assert summary["most_active_facilitator"] == "User 1"
+        assert summary["workload_distribution"]["min"] == 10
+        assert summary["workload_distribution"]["max"] == 30
+        assert summary["workload_distribution"]["median"] == 20.0
 
 
 class TestAnalyticsModels:
@@ -636,3 +950,853 @@ class TestAnalyticsModels:
         assert MetricType.SIGNAL_VOLUME.value == "signal_volume"
         assert MetricType.READINESS_TRANSITIONS.value == "readiness_transitions"
         assert MetricType.FACILITATOR_ACTIONS.value == "facilitator_actions"
+
+
+class TestTopicTrendAnalytics:
+    """Test suite for topic trend detection (S8-10)."""
+
+    @pytest.fixture
+    def mock_collections(self):
+        """Mock MongoDB collections for trends."""
+        signals = MagicMock()
+        candidates = MagicMock()
+        audit_log = MagicMock()
+        clusters = MagicMock()
+        users = MagicMock()
+        return signals, candidates, audit_log, clusters, users
+
+    @pytest.fixture
+    def analytics_service(self, mock_collections):
+        """Create AnalyticsService with mocked collections."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+        return AnalyticsService(
+            signals_collection=signals,
+            candidates_collection=candidates,
+            audit_log_collection=audit_log,
+            clusters_collection=clusters,
+            users_collection=users,
+            max_time_range_days=90,
+            retention_days=365,
+        )
+
+    def test_classify_trend_direction_emerging(self, analytics_service):
+        """Test trend classification for emerging topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=10,
+            current_count=15,
+            volume_change_pct=50.0,
+            first_seen=datetime(2026, 3, 1),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.EMERGING
+
+    def test_classify_trend_direction_declining(self, analytics_service):
+        """Test trend classification for declining topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=20,
+            current_count=10,
+            volume_change_pct=-50.0,
+            first_seen=datetime(2026, 3, 1),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.PEAKED
+
+    def test_classify_trend_direction_stable(self, analytics_service):
+        """Test trend classification for stable topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=10,
+            current_count=11,
+            volume_change_pct=10.0,
+            first_seen=datetime(2026, 3, 1),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.STABLE
+
+    def test_classify_trend_direction_new(self, analytics_service):
+        """Test trend classification for new topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=0,
+            current_count=10,
+            volume_change_pct=100.0,
+            first_seen=datetime(2026, 3, 15),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.NEW
+
+    def test_classify_trend_direction_peaked(self, analytics_service):
+        """Test trend classification for peaked topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=30,
+            current_count=10,
+            volume_change_pct=-66.7,
+            first_seen=datetime(2026, 2, 1),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.PEAKED
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_empty(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test topic trends computation with no data."""
+        signals, _, _, _, _ = mock_collections
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator([])
+
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=5,
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.trends) == 0
+        assert result.summary["total_topics"] == 0
+        assert result.summary["emerging_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_with_data(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test topic trends computation with mock data."""
+        signals, _, _, _, _ = mock_collections
+
+        # Mock aggregation result with trending topics
+        mock_data = [
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Flood in Northern Region",
+                    "topic_type": "incident",
+                },
+                "periods": [
+                    {
+                        "period": "previous",
+                        "count": 5,
+                        "first_seen": datetime(2026, 3, 1),
+                        "last_seen": datetime(2026, 3, 15),
+                    },
+                    {
+                        "period": "current",
+                        "count": 15,
+                        "first_seen": datetime(2026, 3, 16),
+                        "last_seen": datetime(2026, 3, 31),
+                    },
+                ],
+                "total_signals": 20,
+                "keywords": ["flood", "northern"],
+            },
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Food Distribution Center",
+                    "topic_type": "resource_offer",
+                },
+                "periods": [
+                    {
+                        "period": "previous",
+                        "count": 10,
+                        "first_seen": datetime(2026, 3, 1),
+                        "last_seen": datetime(2026, 3, 15),
+                    },
+                    {
+                        "period": "current",
+                        "count": 9,
+                        "first_seen": datetime(2026, 3, 16),
+                        "last_seen": datetime(2026, 3, 31),
+                    },
+                ],
+                "total_signals": 19,
+                "keywords": ["food", "distribution"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=5,
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.trends) == 2
+
+        # First trend should be emerging (5 -> 15 = 200% increase)
+        trend1 = result.trends[0]
+        assert trend1.topic == "Flood in Northern Region"
+        assert trend1.direction == TrendDirection.EMERGING
+        assert trend1.signal_count == 20
+        assert trend1.volume_change_pct == 200.0
+
+        # Second trend should be stable (10 -> 9 = -10% decrease)
+        trend2 = result.trends[1]
+        assert trend2.topic == "Food Distribution Center"
+        assert trend2.direction == TrendDirection.STABLE
+        assert trend2.signal_count == 19
+
+        # Summary statistics
+        assert result.summary["total_topics"] == 2
+        assert result.summary["emerging_count"] == 1
+        assert result.summary["stable_count"] == 1
+        assert result.summary["most_active_topic"] == "Flood in Northern Region"
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_filter_by_direction(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test filtering trends by direction."""
+        signals, _, _, _, _ = mock_collections
+
+        mock_data = [
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Emerging Topic",
+                    "topic_type": "incident",
+                },
+                "periods": [
+                    {"period": "previous", "count": 5, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 15, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 20,
+                "keywords": ["emerging"],
+            },
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Stable Topic",
+                    "topic_type": "need",
+                },
+                "periods": [
+                    {"period": "previous", "count": 10, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 11, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 21,
+                "keywords": ["stable"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator(mock_data)
+
+        # Filter for emerging only
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=5,
+            direction_filter="emerging",
+        )
+
+        assert len(result.trends) == 1
+        assert result.trends[0].topic == "Emerging Topic"
+        assert result.trends[0].direction == TrendDirection.EMERGING
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_filter_by_topic_type(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test filtering trends by topic type."""
+        signals, _, _, _, _ = mock_collections
+
+        mock_data = [
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Incident Topic",
+                    "topic_type": "incident",
+                },
+                "periods": [
+                    {"period": "previous", "count": 5, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 10, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 15,
+                "keywords": ["incident"],
+            },
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Resource Topic",
+                    "topic_type": "resource_offer",
+                },
+                "periods": [
+                    {"period": "previous", "count": 8, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 12, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 20,
+                "keywords": ["resource"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator(mock_data)
+
+        # Filter for incidents only
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=5,
+            topic_type_filter="incident",
+        )
+
+        assert len(result.trends) == 1
+        assert result.trends[0].topic == "Incident Topic"
+        assert result.trends[0].topic_type == "incident"
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_min_signals_filter(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test minimum signals filter."""
+        signals, _, _, _, _ = mock_collections
+
+        # This should be filtered out by the pipeline's $match on min_signals
+        mock_data = [
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Large Topic",
+                    "topic_type": "incident",
+                },
+                "periods": [
+                    {"period": "previous", "count": 5, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 10, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 15,
+                "keywords": ["large"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=10,  # Only topics with >= 10 signals
+        )
+
+        assert len(result.trends) == 1
+        assert result.trends[0].signal_count >= 10
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_exceeds_max_range(
+        self,
+        analytics_service,
+    ):
+        """Test that exceeding max time range raises ValueError."""
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            await analytics_service.compute_topic_trends(
+                workspace_id="W123",
+                start_date=datetime(2026, 1, 1),
+                end_date=datetime(2026, 5, 1),  # 120 days
+                min_signals=5,
+            )
+
+    def test_topic_trend_model(self):
+        """Test TopicTrend model validation."""
+        trend = TopicTrend(
+            topic="Water Shortage",
+            topic_type="need",
+            direction=TrendDirection.EMERGING,
+            signal_count=25,
+            volume_change_pct=150.0,
+            first_seen=datetime(2026, 3, 1),
+            peak_time=datetime(2026, 3, 15),
+            peak_volume=15,
+            keywords=["water", "shortage", "emergency"],
+            related_clusters=["507f1f77bcf86cd799439011"],
+            velocity_score=0.85,
+        )
+
+        assert trend.topic == "Water Shortage"
+        assert trend.direction == TrendDirection.EMERGING
+        assert trend.signal_count == 25
+        assert trend.velocity_score == 0.85
+        assert len(trend.keywords) == 3
+
+    def test_trend_direction_enum_values(self):
+        """Test TrendDirection enum values."""
+        assert TrendDirection.EMERGING.value == "emerging"
+        assert TrendDirection.DECLINING.value == "declining"
+        assert TrendDirection.STABLE.value == "stable"
+        assert TrendDirection.NEW.value == "new"
+        assert TrendDirection.PEAKED.value == "peaked"
+
+
+class TestConflictResolutionAnalytics:
+    """Test suite for conflict resolution time analysis (S8-12)."""
+
+    @pytest.fixture
+    def mock_collections(self):
+        """Mock MongoDB collections for conflict resolution analytics."""
+        signals = MagicMock()
+        candidates = MagicMock()
+        audit_log = MagicMock()
+        clusters = MagicMock()
+        users = MagicMock()
+        return signals, candidates, audit_log, clusters, users
+
+    @pytest.fixture
+    def analytics_service(self, mock_collections):
+        """Create AnalyticsService with mocked collections."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+        return AnalyticsService(
+            signals_collection=signals,
+            candidates_collection=candidates,
+            audit_log_collection=audit_log,
+            clusters_collection=clusters,
+            users_collection=users,
+            max_time_range_days=90,
+            retention_days=365,
+        )
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_empty(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test conflict resolution metrics with no data."""
+        _, _, _, clusters, _ = mock_collections
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator([])
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.by_risk_tier) == 0
+        assert result.summary["total_conflicts"] == 0
+        assert result.summary["total_resolved"] == 0
+        assert result.summary["overall_resolution_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_with_data(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test conflict resolution metrics with mock data."""
+        _, _, _, clusters, _ = mock_collections
+
+        # Mock aggregation result
+        mock_data = [
+            {
+                "_id": "routine",
+                "total_conflicts": 10,
+                "resolved_conflicts": 8,
+                "resolution_times": [2.5, 3.0, 1.5, 4.0, 2.0, 3.5, 2.5, 1.0],
+                "resolution_types": [
+                    "merged",
+                    "merged",
+                    "one_correct",
+                    "merged",
+                    "both_valid",
+                    "merged",
+                    "one_correct",
+                    "merged",
+                ],
+            },
+            {
+                "_id": "elevated",
+                "total_conflicts": 5,
+                "resolved_conflicts": 3,
+                "resolution_times": [5.0, 6.5, 4.0],
+                "resolution_types": ["merged", "one_correct", "merged"],
+            },
+            {
+                "_id": "high_stakes",
+                "total_conflicts": 3,
+                "resolved_conflicts": 1,
+                "resolution_times": [12.0],
+                "resolution_types": ["deferred"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.by_risk_tier) == 3
+
+        # Check routine tier
+        routine = result.by_risk_tier[0]
+        assert routine.risk_tier == "routine"
+        assert routine.total_conflicts == 10
+        assert routine.resolved_conflicts == 8
+        assert routine.resolution_rate == 0.8
+        assert routine.avg_resolution_time_hours == 2.5
+        assert routine.median_resolution_time_hours == 2.5
+        assert routine.min_resolution_time_hours == 1.0
+        assert routine.max_resolution_time_hours == 4.0
+        assert routine.resolution_methods["merged"] == 5
+        assert routine.resolution_methods["one_correct"] == 2
+        assert routine.resolution_methods["both_valid"] == 1
+
+        # Check elevated tier
+        elevated = result.by_risk_tier[1]
+        assert elevated.risk_tier == "elevated"
+        assert elevated.total_conflicts == 5
+        assert elevated.resolved_conflicts == 3
+        assert elevated.resolution_rate == 0.6
+        assert elevated.avg_resolution_time_hours > 5.0
+
+        # Check high_stakes tier
+        high_stakes = result.by_risk_tier[2]
+        assert high_stakes.risk_tier == "high_stakes"
+        assert high_stakes.total_conflicts == 3
+        assert high_stakes.resolved_conflicts == 1
+        assert high_stakes.resolution_rate == 0.333
+        assert high_stakes.resolution_methods["deferred"] == 1
+
+        # Check summary
+        assert result.summary["total_conflicts"] == 18
+        assert result.summary["total_resolved"] == 12
+        assert result.summary["overall_resolution_rate"] == 0.667
+        assert "resolution_methods" in result.summary
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_filter_by_risk_tier(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test filtering by specific risk tier."""
+        _, _, _, clusters, _ = mock_collections
+
+        mock_data = [
+            {
+                "_id": "routine",
+                "total_conflicts": 10,
+                "resolved_conflicts": 8,
+                "resolution_times": [2.5, 3.0, 1.5, 4.0, 2.0, 3.5, 2.5, 1.0],
+                "resolution_types": ["merged"] * 8,
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            risk_tier="routine",
+        )
+
+        assert len(result.by_risk_tier) == 1
+        assert result.by_risk_tier[0].risk_tier == "routine"
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_resolved_only(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test resolved_only filter."""
+        _, _, _, clusters, _ = mock_collections
+
+        # Mock data with all resolved conflicts
+        mock_data = [
+            {
+                "_id": "routine",
+                "total_conflicts": 5,
+                "resolved_conflicts": 5,
+                "resolution_times": [2.0, 3.0, 2.5, 1.5, 4.0],
+                "resolution_types": ["merged"] * 5,
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            resolved_only=True,
+        )
+
+        assert result.by_risk_tier[0].total_conflicts == 5
+        assert result.by_risk_tier[0].resolved_conflicts == 5
+        assert result.by_risk_tier[0].resolution_rate == 1.0
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_exceeds_max_range(
+        self,
+        analytics_service,
+    ):
+        """Test that exceeding max time range raises ValueError."""
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            await analytics_service.compute_conflict_resolution_metrics(
+                workspace_id="W123",
+                start_date=datetime(2026, 1, 1),
+                end_date=datetime(2026, 6, 1),  # 151 days
+            )
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_no_resolution_times(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test handling conflicts with no resolution times."""
+        _, _, _, clusters, _ = mock_collections
+
+        # Mock data with unresolved conflicts (no resolution times)
+        mock_data = [
+            {
+                "_id": "routine",
+                "total_conflicts": 5,
+                "resolved_conflicts": 0,
+                "resolution_times": [],
+                "resolution_types": [],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+        )
+
+        routine = result.by_risk_tier[0]
+        assert routine.avg_resolution_time_hours == 0.0
+        assert routine.median_resolution_time_hours == 0.0
+        assert routine.min_resolution_time_hours == 0.0
+        assert routine.max_resolution_time_hours == 0.0
+
+    def test_conflict_resolution_stats_model(self):
+        """Test ConflictResolutionStats model validation."""
+        from integritykit.models.analytics import ConflictResolutionStats
+
+        stats = ConflictResolutionStats(
+            risk_tier="routine",
+            total_conflicts=20,
+            resolved_conflicts=15,
+            resolution_rate=0.75,
+            avg_resolution_time_hours=3.5,
+            median_resolution_time_hours=3.0,
+            min_resolution_time_hours=1.0,
+            max_resolution_time_hours=8.5,
+            resolution_methods={
+                "merged": 10,
+                "one_correct": 3,
+                "both_valid": 2,
+            },
+        )
+
+        assert stats.risk_tier == "routine"
+        assert stats.total_conflicts == 20
+        assert stats.resolved_conflicts == 15
+        assert stats.resolution_rate == 0.75
+        assert stats.avg_resolution_time_hours == 3.5
+        assert stats.resolution_methods["merged"] == 10
+
+    def test_conflict_resolution_metrics_response_model(self):
+        """Test ConflictResolutionMetricsResponse model."""
+        from integritykit.models.analytics import (
+            ConflictResolutionMetricsResponse,
+            ConflictResolutionStats,
+        )
+
+        stats = [
+            ConflictResolutionStats(
+                risk_tier="routine",
+                total_conflicts=10,
+                resolved_conflicts=8,
+                resolution_rate=0.8,
+                avg_resolution_time_hours=2.5,
+                median_resolution_time_hours=2.0,
+                min_resolution_time_hours=1.0,
+                max_resolution_time_hours=5.0,
+                resolution_methods={"merged": 6, "one_correct": 2},
+            ),
+        ]
+
+        response = ConflictResolutionMetricsResponse(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            by_risk_tier=stats,
+            summary={
+                "total_conflicts": 10,
+                "total_resolved": 8,
+                "overall_resolution_rate": 0.8,
+            },
+        )
+
+        assert response.workspace_id == "W123"
+        assert len(response.by_risk_tier) == 1
+        assert response.summary["total_conflicts"] == 10

@@ -3,6 +3,7 @@
 Implements:
 - FR-COP-READ-002: Missing/weak fields checklist UI
 - Candidate detail views with readiness indicators
+- S8-5: Internationalization support for Block Kit templates
 """
 
 from typing import Any, Optional
@@ -16,7 +17,9 @@ from integritykit.models.cop_candidate import (
     RecommendedAction,
     RiskTier,
 )
+from integritykit.models.language import LanguageCode
 from integritykit.services.readiness import FieldEvaluation, FieldStatus, ReadinessEvaluation
+from integritykit.slack.i18n import TranslationKey, build_clarification_message, get_translation
 
 
 # ============================================================================
@@ -79,12 +82,14 @@ FIELD_LABELS = {
 def build_fields_checklist_blocks(
     candidate: COPCandidate,
     field_evaluations: list[FieldEvaluation],
+    language: str | LanguageCode = LanguageCode.EN,
 ) -> list[dict[str, Any]]:
     """Build Slack blocks for the missing/weak fields checklist.
 
     Args:
         candidate: COP candidate to display
         field_evaluations: Field evaluation results
+        language: Language code for translations (defaults to English)
 
     Returns:
         List of Slack Block Kit blocks
@@ -96,7 +101,7 @@ def build_fields_checklist_blocks(
         "type": "header",
         "text": {
             "type": "plain_text",
-            "text": "Field Completeness Checklist",
+            "text": get_translation(TranslationKey.FIELD_COMPLETENESS_CHECKLIST, language),
             "emoji": True,
         },
     })
@@ -107,13 +112,13 @@ def build_fields_checklist_blocks(
     complete_count = sum(1 for fe in field_evaluations if fe.status == FieldStatus.COMPLETE)
 
     if missing_count == 0 and partial_count == 0:
-        summary_text = ":white_check_mark: All fields are complete!"
+        summary_text = f":white_check_mark: {get_translation(TranslationKey.ALL_FIELDS_COMPLETE, language)}"
         summary_color = "good"
     elif missing_count > 0:
-        summary_text = f":warning: {missing_count} missing, {partial_count} need improvement"
+        summary_text = f":warning: {get_translation(TranslationKey.MISSING_FIELDS_WARNING, language, missing=missing_count, partial=partial_count)}"
         summary_color = "danger"
     else:
-        summary_text = f":hourglass: {partial_count} fields need improvement"
+        summary_text = f":hourglass: {get_translation(TranslationKey.FIELDS_NEED_IMPROVEMENT, language, partial=partial_count)}"
         summary_color = "warning"
 
     blocks.append({
@@ -129,8 +134,8 @@ def build_fields_checklist_blocks(
     # Field-by-field breakdown
     for fe in field_evaluations:
         icon = FIELD_STATUS_ICONS.get(fe.status, ":grey_question:")
-        label = FIELD_LABELS.get(fe.field, fe.field.title())
-        status_text = FIELD_STATUS_TEXT.get(fe.status, "Unknown")
+        label = get_translation(fe.field, language) if fe.field in ["what", "where", "when", "who", "so_what"] else fe.field.title()
+        status_text = get_translation(fe.status.value if hasattr(fe.status, "value") else str(fe.status), language)
 
         value_preview = ""
         if fe.value:
@@ -161,12 +166,14 @@ def build_fields_checklist_blocks(
 def build_readiness_summary_blocks(
     candidate: COPCandidate,
     evaluation: ReadinessEvaluation,
+    language: str | LanguageCode = LanguageCode.EN,
 ) -> list[dict[str, Any]]:
     """Build Slack blocks showing readiness status summary.
 
     Args:
         candidate: COP candidate
         evaluation: Readiness evaluation results
+        language: Language code for translations (defaults to English)
 
     Returns:
         List of Slack Block Kit blocks
@@ -175,23 +182,31 @@ def build_readiness_summary_blocks(
 
     # Readiness state header
     state_icon = READINESS_STATE_ICONS.get(evaluation.readiness_state, ":grey_question:")
-    state_text = READINESS_STATE_TEXT.get(evaluation.readiness_state, "Unknown")
+    # Map readiness state to translation key
+    state_key_map = {
+        ReadinessState.VERIFIED: TranslationKey.READY_VERIFIED,
+        ReadinessState.IN_REVIEW: TranslationKey.READY_IN_REVIEW,
+        ReadinessState.BLOCKED: TranslationKey.BLOCKED,
+    }
+    state_key = state_key_map.get(evaluation.readiness_state, TranslationKey.BLOCKED)
+    state_text = get_translation(state_key, language)
 
     blocks.append({
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"*Readiness Status:* {state_icon} {state_text}",
+            "text": f"*{get_translation(TranslationKey.READINESS_STATUS, language)}:* {state_icon} {state_text}",
         },
     })
 
     # Risk tier
     risk_icon = RISK_TIER_ICONS.get(candidate.risk_tier, ":grey_question:")
+    risk_tier_text = get_translation(candidate.risk_tier.value if hasattr(candidate.risk_tier, "value") else str(candidate.risk_tier), language)
     blocks.append({
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"*Risk Tier:* {risk_icon} {candidate.risk_tier.replace('_', ' ').title()}",
+            "text": f"*{get_translation(TranslationKey.RISK_TIER, language)}:* {risk_icon} {risk_tier_text}",
         },
     })
 
@@ -202,7 +217,7 @@ def build_readiness_summary_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": ":no_entry: *Blocking Issues:*",
+                "text": f":no_entry: *{get_translation(TranslationKey.BLOCKING_ISSUES, language)}:*",
             },
         })
 
@@ -236,6 +251,7 @@ def build_next_action_blocks(
     candidate: COPCandidate,
     recommended_action: Optional[RecommendedAction],
     clarification_template: Optional[str] = None,
+    language: str | LanguageCode = LanguageCode.EN,
 ) -> list[dict[str, Any]]:
     """Build Slack blocks showing recommended next action.
 
@@ -243,6 +259,7 @@ def build_next_action_blocks(
         candidate: COP candidate
         recommended_action: Recommended action from evaluation
         clarification_template: Optional clarification message template
+        language: Language code for translations (defaults to English)
 
     Returns:
         List of Slack Block Kit blocks
@@ -254,20 +271,22 @@ def build_next_action_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": ":thumbsup: No action required at this time.",
+                "text": f":thumbsup: {get_translation(TranslationKey.NO_ACTION_REQUIRED, language)}",
             },
         })
         return blocks
 
     # Action header
     action_icon = ACTION_TYPE_ICONS.get(recommended_action.action_type, ":arrow_right:")
-    action_name = recommended_action.action_type.value.replace("_", " ").title()
+    # Map action type to translation key
+    action_type_value = recommended_action.action_type.value if hasattr(recommended_action.action_type, "value") else str(recommended_action.action_type)
+    action_name = get_translation(action_type_value, language)
 
     blocks.append({
         "type": "header",
         "text": {
             "type": "plain_text",
-            "text": "Recommended Next Action",
+            "text": get_translation(TranslationKey.RECOMMENDED_NEXT_ACTION, language),
             "emoji": True,
         },
     })
@@ -289,16 +308,17 @@ def build_next_action_blocks(
         ActionType.MERGE_CANDIDATES: "merge_candidates",
     }
 
-    button_text_map = {
-        ActionType.ASSIGN_VERIFICATION: "Assign Verifier",
-        ActionType.RESOLVE_CONFLICT: "View Conflicts",
-        ActionType.ADD_EVIDENCE: "Request Info",
-        ActionType.READY_TO_PUBLISH: "Publish",
-        ActionType.MERGE_CANDIDATES: "View Duplicates",
+    button_key_map = {
+        ActionType.ASSIGN_VERIFICATION: TranslationKey.ASSIGN_VERIFIER,
+        ActionType.RESOLVE_CONFLICT: TranslationKey.VIEW_CONFLICTS,
+        ActionType.ADD_EVIDENCE: TranslationKey.REQUEST_INFO,
+        ActionType.READY_TO_PUBLISH: TranslationKey.PUBLISH,
+        ActionType.MERGE_CANDIDATES: TranslationKey.VIEW_DUPLICATES,
     }
 
     action_id = action_id_map.get(recommended_action.action_type, "view_candidate")
-    button_text = button_text_map.get(recommended_action.action_type, "Take Action")
+    button_key = button_key_map.get(recommended_action.action_type, TranslationKey.VIEW)
+    button_text = get_translation(button_key, language)
 
     blocks.append({
         "type": "actions",
@@ -324,7 +344,7 @@ def build_next_action_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*Suggested Message:*",
+                "text": f"*{get_translation(TranslationKey.SUGGESTED_MESSAGE, language)}*",
             },
         })
         blocks.append({
@@ -339,7 +359,7 @@ def build_next_action_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":bulb: Copy this message to request clarification from the source.",
+                    "text": f":bulb: {get_translation(TranslationKey.COPY_MESSAGE_HINT, language)}",
                 },
             ],
         })
@@ -348,14 +368,14 @@ def build_next_action_blocks(
     if recommended_action.alternatives:
         blocks.append({"type": "divider"})
         alt_text = ", ".join(
-            a.replace("_", " ").title() for a in recommended_action.alternatives[:3]
+            get_translation(a, language) for a in recommended_action.alternatives[:3]
         )
         blocks.append({
             "type": "context",
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f":arrows_counterclockwise: *Alternatives:* {alt_text}",
+                    "text": f":arrows_counterclockwise: *{get_translation(TranslationKey.ALTERNATIVES, language)}* {alt_text}",
                 },
             ],
         })
@@ -367,6 +387,7 @@ def build_candidate_detail_blocks(
     candidate: COPCandidate,
     field_evaluations: list[FieldEvaluation],
     evaluation: ReadinessEvaluation,
+    language: str | LanguageCode = LanguageCode.EN,
 ) -> list[dict[str, Any]]:
     """Build full candidate detail view with all sections.
 
@@ -374,6 +395,7 @@ def build_candidate_detail_blocks(
         candidate: COP candidate
         field_evaluations: Field evaluation results
         evaluation: Readiness evaluation results
+        language: Language code for translations (defaults to English)
 
     Returns:
         List of Slack Block Kit blocks for modal or App Home
@@ -382,36 +404,43 @@ def build_candidate_detail_blocks(
 
     # Candidate header
     state_icon = READINESS_STATE_ICONS.get(evaluation.readiness_state, ":grey_question:")
-    state_text = READINESS_STATE_TEXT.get(evaluation.readiness_state, "Unknown")
+    state_key_map = {
+        ReadinessState.VERIFIED: TranslationKey.READY_VERIFIED,
+        ReadinessState.IN_REVIEW: TranslationKey.READY_IN_REVIEW,
+        ReadinessState.BLOCKED: TranslationKey.BLOCKED,
+    }
+    state_key = state_key_map.get(evaluation.readiness_state, TranslationKey.BLOCKED)
+    state_text = get_translation(state_key, language)
 
     blocks.append({
         "type": "header",
         "text": {
             "type": "plain_text",
-            "text": f"COP Candidate Details",
+            "text": get_translation(TranslationKey.COP_CANDIDATE_DETAILS, language),
             "emoji": True,
         },
     })
 
     # Status summary
+    risk_tier_text = get_translation(candidate.risk_tier.value if hasattr(candidate.risk_tier, "value") else str(candidate.risk_tier), language)
     blocks.append({
         "type": "section",
         "fields": [
             {
                 "type": "mrkdwn",
-                "text": f"*Status:*\n{state_icon} {state_text}",
+                "text": f"*{get_translation(TranslationKey.READINESS_STATUS, language)}:*\n{state_icon} {state_text}",
             },
             {
                 "type": "mrkdwn",
-                "text": f"*Verifications:*\n{len(candidate.verifications)}",
+                "text": f"*{get_translation(TranslationKey.VERIFICATIONS, language).title()}:*\n{len(candidate.verifications)}",
             },
             {
                 "type": "mrkdwn",
-                "text": f"*Risk Tier:*\n{candidate.risk_tier.replace('_', ' ').title()}",
+                "text": f"*{get_translation(TranslationKey.RISK_TIER, language)}:*\n{risk_tier_text}",
             },
             {
                 "type": "mrkdwn",
-                "text": f"*Evidence:*\n{len(candidate.evidence.slack_permalinks) + len(candidate.evidence.external_sources)} sources",
+                "text": f"*{get_translation(TranslationKey.EVIDENCE, language)}:*\n{len(candidate.evidence.slack_permalinks) + len(candidate.evidence.external_sources)} sources",
             },
         ],
     })
@@ -419,11 +448,12 @@ def build_candidate_detail_blocks(
     blocks.append({"type": "divider"})
 
     # COP Fields
+    not_specified = get_translation(TranslationKey.NOT_SPECIFIED, language)
     blocks.append({
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": "*COP Information:*",
+            "text": f"*{get_translation(TranslationKey.COP_INFORMATION, language)}:*",
         },
     })
 
@@ -434,7 +464,7 @@ def build_candidate_detail_blocks(
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"{what_icon} *What:* {candidate.fields.what or '_Not specified_'}",
+            "text": f"{what_icon} *{get_translation(TranslationKey.WHAT, language)}:* {candidate.fields.what or f'_{not_specified}_'}",
         },
     })
 
@@ -445,7 +475,7 @@ def build_candidate_detail_blocks(
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"{where_icon} *Where:* {candidate.fields.where or '_Not specified_'}",
+            "text": f"{where_icon} *{get_translation(TranslationKey.WHERE, language)}:* {candidate.fields.where or f'_{not_specified}_'}",
         },
     })
 
@@ -459,7 +489,7 @@ def build_candidate_detail_blocks(
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"{when_icon} *When:* {when_value or '_Not specified_'}",
+            "text": f"{when_icon} *{get_translation(TranslationKey.WHEN, language)}:* {when_value or f'_{not_specified}_'}",
         },
     })
 
@@ -470,7 +500,7 @@ def build_candidate_detail_blocks(
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"{who_icon} *Who:* {candidate.fields.who or '_Not specified_'}",
+            "text": f"{who_icon} *{get_translation(TranslationKey.WHO, language)}:* {candidate.fields.who or f'_{not_specified}_'}",
         },
     })
 
@@ -481,14 +511,14 @@ def build_candidate_detail_blocks(
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"{so_what_icon} *So What:* {candidate.fields.so_what or '_Not specified_'}",
+            "text": f"{so_what_icon} *{get_translation(TranslationKey.SO_WHAT, language)}:* {candidate.fields.so_what or f'_{not_specified}_'}",
         },
     })
 
     blocks.append({"type": "divider"})
 
     # Add readiness summary
-    blocks.extend(build_readiness_summary_blocks(candidate, evaluation))
+    blocks.extend(build_readiness_summary_blocks(candidate, evaluation, language))
 
     blocks.append({"type": "divider"})
 
@@ -499,7 +529,7 @@ def build_candidate_detail_blocks(
         pass
 
     blocks.extend(build_next_action_blocks(
-        candidate, evaluation.recommended_action, clarification_template
+        candidate, evaluation.recommended_action, clarification_template, language
     ))
 
     # Action buttons
@@ -511,7 +541,7 @@ def build_candidate_detail_blocks(
                 "type": "button",
                 "text": {
                     "type": "plain_text",
-                    "text": "View Full Details",
+                    "text": get_translation(TranslationKey.VIEW_FULL_DETAILS, language),
                     "emoji": True,
                 },
                 "action_id": f"view_candidate_full_{candidate.id}",
@@ -521,7 +551,7 @@ def build_candidate_detail_blocks(
                 "type": "button",
                 "text": {
                     "type": "plain_text",
-                    "text": "Re-evaluate",
+                    "text": get_translation(TranslationKey.REEVALUATE, language),
                     "emoji": True,
                 },
                 "action_id": f"reevaluate_candidate_{candidate.id}",
@@ -535,11 +565,13 @@ def build_candidate_detail_blocks(
 
 def build_candidate_list_item_blocks(
     candidate: COPCandidate,
+    language: str | LanguageCode = LanguageCode.EN,
 ) -> list[dict[str, Any]]:
     """Build compact candidate list item for backlog/list views.
 
     Args:
         candidate: COP candidate
+        language: Language code for translations (defaults to English)
 
     Returns:
         List of Slack Block Kit blocks for a single list item
@@ -548,20 +580,23 @@ def build_candidate_list_item_blocks(
     risk_icon = RISK_TIER_ICONS.get(candidate.risk_tier, ":grey_question:")
 
     # Truncate what field for preview
-    what_preview = candidate.fields.what[:80] + "..." if len(candidate.fields.what or "") > 80 else (candidate.fields.what or "Untitled")
+    what_preview = candidate.fields.what[:80] + "..." if len(candidate.fields.what or "") > 80 else (candidate.fields.what or get_translation(TranslationKey.UNTITLED, language))
+
+    risk_tier_text = get_translation(candidate.risk_tier.value if hasattr(candidate.risk_tier, "value") else str(candidate.risk_tier), language)
+    verifications_text = get_translation(TranslationKey.VERIFICATIONS, language)
 
     blocks = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"{state_icon} *{what_preview}*\n{risk_icon} {candidate.risk_tier.replace('_', ' ').title()} | :memo: {len(candidate.verifications)} verifications",
+                "text": f"{state_icon} *{what_preview}*\n{risk_icon} {risk_tier_text} | :memo: {len(candidate.verifications)} {verifications_text}",
             },
             "accessory": {
                 "type": "button",
                 "text": {
                     "type": "plain_text",
-                    "text": "View",
+                    "text": get_translation(TranslationKey.VIEW, language),
                     "emoji": True,
                 },
                 "action_id": f"view_candidate_{candidate.id}",
@@ -576,12 +611,13 @@ def build_candidate_list_item_blocks(
         if bi.severity == BlockingIssueSeverity.BLOCKS_PUBLISHING
     )
     if blocking_count > 0:
+        blocking_issue_text = get_translation(TranslationKey.BLOCKING_ISSUE_COUNT, language)
         blocks.append({
             "type": "context",
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f":no_entry: {blocking_count} blocking issue(s)",
+                    "text": f":no_entry: {blocking_count} {blocking_issue_text}",
                 },
             ],
         })
