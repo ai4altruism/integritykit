@@ -358,3 +358,77 @@ class FacilitatorWorkloadResponse(BaseModel):
         default_factory=dict,
         description="Summary statistics (total_facilitators, total_actions, avg_actions, etc.)",
     )
+
+
+class ConflictResolutionStats(BaseModel):
+    """Conflict resolution statistics for a risk tier.
+
+    Tracks resolution times and methods by risk tier for workload analysis
+    and process optimization (S8-12).
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    risk_tier: str = Field(
+        ...,
+        description="Risk tier (routine, elevated, high_stakes)",
+    )
+    total_conflicts: int = Field(
+        ...,
+        description="Total conflicts detected in this risk tier",
+    )
+    resolved_conflicts: int = Field(
+        ...,
+        description="Number of conflicts that have been resolved",
+    )
+    resolution_rate: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Ratio of resolved to total conflicts (0.0 - 1.0)",
+    )
+    avg_resolution_time_hours: float = Field(
+        ...,
+        description="Average time from detection to resolution (hours)",
+    )
+    median_resolution_time_hours: float = Field(
+        ...,
+        description="Median time from detection to resolution (hours)",
+    )
+    min_resolution_time_hours: float = Field(
+        ...,
+        description="Minimum time from detection to resolution (hours)",
+    )
+    max_resolution_time_hours: float = Field(
+        ...,
+        description="Maximum time from detection to resolution (hours)",
+    )
+    resolution_methods: dict[str, int] = Field(
+        default_factory=dict,
+        description="Count of resolutions by method (merged, one_correct, both_valid, deferred)",
+    )
+
+
+class ConflictResolutionMetricsResponse(BaseModel):
+    """Response containing conflict resolution time analysis metrics."""
+
+    workspace_id: str = Field(
+        ...,
+        description="Slack workspace ID",
+    )
+    start_date: datetime = Field(
+        ...,
+        description="Start date of analysis period",
+    )
+    end_date: datetime = Field(
+        ...,
+        description="End date of analysis period",
+    )
+    by_risk_tier: list[ConflictResolutionStats] = Field(
+        default_factory=list,
+        description="Conflict resolution stats grouped by risk tier",
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Summary statistics (total_conflicts, overall_resolution_rate, avg_time, etc.)",
+    )

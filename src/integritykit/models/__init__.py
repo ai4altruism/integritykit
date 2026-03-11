@@ -26,6 +26,16 @@ from integritykit.models.cop_candidate import (
     ReadinessState,
     RiskTier,
 )
+from integritykit.models.external_source import (
+    ExternalSource,
+    ExternalSourceCreate,
+    ExternalSourceUpdate,
+    ImportedVerification,
+    ImportRequest,
+    ImportResult,
+    SourceType,
+    TrustLevel,
+)
 from integritykit.models.signal import (
     AIFlags,
     PyObjectId,
@@ -54,6 +64,12 @@ __all__ = [
     "COPCandidate",
     "COPCandidateCreate",
     "COPFields",
+    "ExternalSource",
+    "ExternalSourceCreate",
+    "ExternalSourceUpdate",
+    "ImportedVerification",
+    "ImportRequest",
+    "ImportResult",
     "PriorityScores",
     "PyObjectId",
     "ReadinessState",
@@ -62,4 +78,6 @@ __all__ = [
     "SignalCreate",
     "SourceQuality",
     "SourceQualityType",
+    "SourceType",
+    "TrustLevel",
 ]

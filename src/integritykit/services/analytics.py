@@ -12,6 +12,8 @@ import structlog
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from integritykit.models.analytics import (
+    ConflictResolutionMetricsResponse,
+    ConflictResolutionStats,
     FacilitatorActionDataPoint,
     FacilitatorWorkload,
     FacilitatorWorkloadResponse,
@@ -1001,6 +1003,241 @@ class AnalyticsService:
             start_date=start_date,
             end_date=end_date,
             facilitators=facilitators,
+            summary=summary,
+        )
+
+    async def compute_conflict_resolution_metrics(
+        self,
+        workspace_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        risk_tier: Optional[str] = None,
+        resolved_only: bool = False,
+    ) -> ConflictResolutionMetricsResponse:
+        """Compute conflict resolution time analysis metrics (S8-12).
+
+        Analyzes conflict detection and resolution patterns including:
+        - Resolution times from detection to resolution
+        - Resolution rates by risk tier
+        - Resolution method distribution
+        - Time statistics (avg, median, min, max)
+
+        Conflicts are stored in clusters.conflicts array with detected_at and
+        resolved_at timestamps. Risk tier is determined from associated COP candidate.
+
+        Args:
+            workspace_id: Slack workspace ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+            risk_tier: Filter by risk tier (routine, elevated, high_stakes) - optional
+            resolved_only: Only include resolved conflicts (default: False)
+
+        Returns:
+            ConflictResolutionMetricsResponse with resolution metrics by risk tier
+
+        Raises:
+            ValueError: If time range exceeds maximum
+        """
+        # Validate time range
+        time_range = (end_date - start_date).days
+        if time_range > self.max_time_range_days:
+            raise ValueError(
+                f"Time range ({time_range} days) exceeds maximum "
+                f"({self.max_time_range_days} days)"
+            )
+
+        # Build aggregation pipeline to analyze conflicts
+        # We need to:
+        # 1. Find all clusters in workspace with conflicts in date range
+        # 2. Unwind conflicts array to process each conflict
+        # 3. Join with cop_candidates to get risk_tier
+        # 4. Calculate resolution times
+        # 5. Group by risk_tier
+
+        match_stage = {
+            "slack_workspace_id": workspace_id,
+            "conflicts": {"$exists": True, "$ne": []},
+        }
+
+        pipeline = [
+            {"$match": match_stage},
+            # Unwind conflicts array to process each conflict
+            {"$unwind": "$conflicts"},
+            # Filter conflicts by date range
+            {
+                "$match": {
+                    "conflicts.detected_at": {"$gte": start_date, "$lte": end_date},
+                }
+            },
+            # Filter by resolved status if needed
+            *([{"$match": {"conflicts.resolved": True}}] if resolved_only else []),
+            # Lookup associated COP candidate to get risk tier
+            {
+                "$lookup": {
+                    "from": "cop_candidates",
+                    "localField": "cop_candidate_id",
+                    "foreignField": "_id",
+                    "as": "candidate_info",
+                }
+            },
+            # Project fields we need
+            {
+                "$project": {
+                    "conflict_id": "$conflicts.id",
+                    "detected_at": "$conflicts.detected_at",
+                    "resolved": "$conflicts.resolved",
+                    "resolved_at": "$conflicts.resolved_at",
+                    "resolution_type": "$conflicts.resolution.type",
+                    "risk_tier": {
+                        "$ifNull": [
+                            {"$arrayElemAt": ["$candidate_info.risk_tier", 0]},
+                            "routine",  # Default to routine if no candidate
+                        ]
+                    },
+                    "resolution_time_hours": {
+                        "$cond": [
+                            {"$and": ["$conflicts.resolved", "$conflicts.resolved_at"]},
+                            {
+                                "$divide": [
+                                    {
+                                        "$subtract": [
+                                            "$conflicts.resolved_at",
+                                            "$conflicts.detected_at",
+                                        ]
+                                    },
+                                    3600000,  # Convert milliseconds to hours
+                                ]
+                            },
+                            None,
+                        ]
+                    },
+                }
+            },
+            # Filter by risk tier if specified
+            *(
+                [{"$match": {"risk_tier": risk_tier}}]
+                if risk_tier
+                else []
+            ),
+            # Group by risk tier
+            {
+                "$group": {
+                    "_id": "$risk_tier",
+                    "total_conflicts": {"$sum": 1},
+                    "resolved_conflicts": {
+                        "$sum": {"$cond": ["$resolved", 1, 0]}
+                    },
+                    "resolution_times": {
+                        "$push": {
+                            "$cond": ["$resolution_time_hours", "$resolution_time_hours", None]
+                        }
+                    },
+                    "resolution_types": {
+                        "$push": {
+                            "$cond": ["$resolution_type", "$resolution_type", None]
+                        }
+                    },
+                }
+            },
+            {"$sort": {"_id": 1}},
+        ]
+
+        stats_by_tier: list[ConflictResolutionStats] = []
+        total_conflicts = 0
+        total_resolved = 0
+
+        async for doc in self.clusters.aggregate(pipeline):
+            tier = doc["_id"]
+            total = doc["total_conflicts"]
+            resolved = doc["resolved_conflicts"]
+            total_conflicts += total
+            total_resolved += resolved
+
+            # Calculate resolution rate
+            resolution_rate = resolved / total if total > 0 else 0.0
+
+            # Filter out None values from resolution times
+            resolution_times = [
+                t for t in doc.get("resolution_times", []) if t is not None
+            ]
+
+            # Calculate time statistics
+            if resolution_times:
+                avg_time = sum(resolution_times) / len(resolution_times)
+                sorted_times = sorted(resolution_times)
+                n = len(sorted_times)
+                if n % 2 == 0:
+                    median_time = (sorted_times[n // 2 - 1] + sorted_times[n // 2]) / 2
+                else:
+                    median_time = sorted_times[n // 2]
+                min_time = min(resolution_times)
+                max_time = max(resolution_times)
+            else:
+                avg_time = 0.0
+                median_time = 0.0
+                min_time = 0.0
+                max_time = 0.0
+
+            # Count resolution methods
+            resolution_methods: dict[str, int] = {}
+            for method in doc.get("resolution_types", []):
+                if method:
+                    resolution_methods[method] = resolution_methods.get(method, 0) + 1
+
+            stats = ConflictResolutionStats(
+                risk_tier=tier,
+                total_conflicts=total,
+                resolved_conflicts=resolved,
+                resolution_rate=round(resolution_rate, 3),
+                avg_resolution_time_hours=round(avg_time, 2),
+                median_resolution_time_hours=round(median_time, 2),
+                min_resolution_time_hours=round(min_time, 2),
+                max_resolution_time_hours=round(max_time, 2),
+                resolution_methods=resolution_methods,
+            )
+            stats_by_tier.append(stats)
+
+        # Calculate summary statistics
+        overall_resolution_rate = (
+            total_resolved / total_conflicts if total_conflicts > 0 else 0.0
+        )
+
+        # Calculate overall average resolution time
+        all_times = []
+        for stat in stats_by_tier:
+            if stat.resolved_conflicts > 0:
+                # Weight by number of resolved conflicts
+                all_times.extend([stat.avg_resolution_time_hours] * stat.resolved_conflicts)
+
+        overall_avg_time = sum(all_times) / len(all_times) if all_times else 0.0
+
+        # Aggregate resolution methods across all tiers
+        all_methods: dict[str, int] = {}
+        for stat in stats_by_tier:
+            for method, count in stat.resolution_methods.items():
+                all_methods[method] = all_methods.get(method, 0) + count
+
+        summary = {
+            "total_conflicts": total_conflicts,
+            "total_resolved": total_resolved,
+            "overall_resolution_rate": round(overall_resolution_rate, 3),
+            "overall_avg_resolution_time_hours": round(overall_avg_time, 2),
+            "resolution_methods": all_methods,
+        }
+
+        logger.info(
+            "Computed conflict resolution metrics",
+            workspace_id=workspace_id,
+            total_conflicts=total_conflicts,
+            total_resolved=total_resolved,
+            resolution_rate=overall_resolution_rate,
+        )
+
+        return ConflictResolutionMetricsResponse(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            by_risk_tier=stats_by_tier,
             summary=summary,
         )
 

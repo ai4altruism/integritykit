@@ -15,6 +15,7 @@ from integritykit.api.dependencies import (
     RequireViewMetrics,
 )
 from integritykit.models.analytics import (
+    ConflictResolutionMetricsResponse,
     FacilitatorWorkloadResponse,
     Granularity,
     MetricType,
@@ -506,4 +507,114 @@ async def get_facilitator_workload(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to compute facilitator workload analytics",
+        )
+
+
+@router.get("/conflict-resolution", response_model=ConflictResolutionMetricsResponse)
+async def get_conflict_resolution_metrics(
+    user: CurrentUser,
+    _: None = RequireViewMetrics,
+    workspace_id: str = Query(..., description="Slack workspace ID"),
+    start_date: datetime = Query(
+        ...,
+        description="Start of time range for analysis",
+    ),
+    end_date: datetime = Query(
+        ...,
+        description="End of time range for analysis",
+    ),
+    risk_tier: str | None = Query(
+        default=None,
+        description="Filter by risk tier (routine, elevated, high_stakes) - optional",
+    ),
+    resolved_only: bool = Query(
+        default=False,
+        description="Only include resolved conflicts (default: False)",
+    ),
+    analytics_service: AnalyticsService = Depends(get_analytics_service_dependency),
+) -> ConflictResolutionMetricsResponse:
+    """Get conflict resolution time analysis metrics (S8-12).
+
+    Analyzes conflict detection and resolution patterns including:
+    - Resolution times from detection to resolution
+    - Resolution rates by risk tier
+    - Resolution method distribution (merged, one_correct, both_valid, deferred)
+    - Time statistics (avg, median, min, max) by risk tier
+
+    Useful for:
+    - Process optimization
+    - Workload planning
+    - Identifying bottlenecks in conflict resolution
+    - Training needs assessment
+
+    Requires facilitator or workspace_admin role.
+
+    Args:
+        user: Current authenticated user
+        workspace_id: Slack workspace ID
+        start_date: Start of time range
+        end_date: End of time range
+        risk_tier: Filter by specific risk tier (optional)
+        resolved_only: Only include resolved conflicts
+        analytics_service: Analytics service
+
+    Returns:
+        ConflictResolutionMetricsResponse with metrics grouped by risk tier
+
+    Raises:
+        HTTPException: If time range is invalid or exceeds maximum
+    """
+    now = datetime.utcnow()
+
+    # Validate date range
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be before end_date",
+        )
+
+    # Validate that end_date is not in the future
+    if end_date > now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date cannot be in the future",
+        )
+
+    # Validate risk_tier if provided
+    if risk_tier:
+        valid_tiers = ["routine", "elevated", "high_stakes"]
+        if risk_tier not in valid_tiers:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid risk_tier. Must be one of: {', '.join(valid_tiers)}",
+            )
+
+    try:
+        response = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            risk_tier=risk_tier,
+            resolved_only=resolved_only,
+        )
+        return response
+    except ValueError as e:
+        logger.warning(
+            "Invalid conflict resolution metrics request",
+            workspace_id=workspace_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to compute conflict resolution metrics",
+            workspace_id=workspace_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to compute conflict resolution metrics",
         )

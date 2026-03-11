@@ -15,6 +15,8 @@ import pytest
 from bson import ObjectId
 
 from integritykit.models.analytics import (
+    ConflictResolutionMetricsResponse,
+    ConflictResolutionStats,
     FacilitatorActionDataPoint,
     FacilitatorWorkload,
     Granularity,
@@ -1407,3 +1409,394 @@ class TestTopicTrendAnalytics:
         assert TrendDirection.STABLE.value == "stable"
         assert TrendDirection.NEW.value == "new"
         assert TrendDirection.PEAKED.value == "peaked"
+
+
+class TestConflictResolutionAnalytics:
+    """Test suite for conflict resolution time analysis (S8-12)."""
+
+    @pytest.fixture
+    def mock_collections(self):
+        """Mock MongoDB collections for conflict resolution analytics."""
+        signals = MagicMock()
+        candidates = MagicMock()
+        audit_log = MagicMock()
+        clusters = MagicMock()
+        users = MagicMock()
+        return signals, candidates, audit_log, clusters, users
+
+    @pytest.fixture
+    def analytics_service(self, mock_collections):
+        """Create AnalyticsService with mocked collections."""
+        signals, candidates, audit_log, clusters, users = mock_collections
+        return AnalyticsService(
+            signals_collection=signals,
+            candidates_collection=candidates,
+            audit_log_collection=audit_log,
+            clusters_collection=clusters,
+            users_collection=users,
+            max_time_range_days=90,
+            retention_days=365,
+        )
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_empty(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test conflict resolution metrics with no data."""
+        _, _, _, clusters, _ = mock_collections
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator([])
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.by_risk_tier) == 0
+        assert result.summary["total_conflicts"] == 0
+        assert result.summary["total_resolved"] == 0
+        assert result.summary["overall_resolution_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_with_data(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test conflict resolution metrics with mock data."""
+        _, _, _, clusters, _ = mock_collections
+
+        # Mock aggregation result
+        mock_data = [
+            {
+                "_id": "routine",
+                "total_conflicts": 10,
+                "resolved_conflicts": 8,
+                "resolution_times": [2.5, 3.0, 1.5, 4.0, 2.0, 3.5, 2.5, 1.0],
+                "resolution_types": [
+                    "merged",
+                    "merged",
+                    "one_correct",
+                    "merged",
+                    "both_valid",
+                    "merged",
+                    "one_correct",
+                    "merged",
+                ],
+            },
+            {
+                "_id": "elevated",
+                "total_conflicts": 5,
+                "resolved_conflicts": 3,
+                "resolution_times": [5.0, 6.5, 4.0],
+                "resolution_types": ["merged", "one_correct", "merged"],
+            },
+            {
+                "_id": "high_stakes",
+                "total_conflicts": 3,
+                "resolved_conflicts": 1,
+                "resolution_times": [12.0],
+                "resolution_types": ["deferred"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.by_risk_tier) == 3
+
+        # Check routine tier
+        routine = result.by_risk_tier[0]
+        assert routine.risk_tier == "routine"
+        assert routine.total_conflicts == 10
+        assert routine.resolved_conflicts == 8
+        assert routine.resolution_rate == 0.8
+        assert routine.avg_resolution_time_hours == 2.5
+        assert routine.median_resolution_time_hours == 2.5
+        assert routine.min_resolution_time_hours == 1.0
+        assert routine.max_resolution_time_hours == 4.0
+        assert routine.resolution_methods["merged"] == 5
+        assert routine.resolution_methods["one_correct"] == 2
+        assert routine.resolution_methods["both_valid"] == 1
+
+        # Check elevated tier
+        elevated = result.by_risk_tier[1]
+        assert elevated.risk_tier == "elevated"
+        assert elevated.total_conflicts == 5
+        assert elevated.resolved_conflicts == 3
+        assert elevated.resolution_rate == 0.6
+        assert elevated.avg_resolution_time_hours > 5.0
+
+        # Check high_stakes tier
+        high_stakes = result.by_risk_tier[2]
+        assert high_stakes.risk_tier == "high_stakes"
+        assert high_stakes.total_conflicts == 3
+        assert high_stakes.resolved_conflicts == 1
+        assert high_stakes.resolution_rate == 0.333
+        assert high_stakes.resolution_methods["deferred"] == 1
+
+        # Check summary
+        assert result.summary["total_conflicts"] == 18
+        assert result.summary["total_resolved"] == 12
+        assert result.summary["overall_resolution_rate"] == 0.667
+        assert "resolution_methods" in result.summary
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_filter_by_risk_tier(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test filtering by specific risk tier."""
+        _, _, _, clusters, _ = mock_collections
+
+        mock_data = [
+            {
+                "_id": "routine",
+                "total_conflicts": 10,
+                "resolved_conflicts": 8,
+                "resolution_times": [2.5, 3.0, 1.5, 4.0, 2.0, 3.5, 2.5, 1.0],
+                "resolution_types": ["merged"] * 8,
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            risk_tier="routine",
+        )
+
+        assert len(result.by_risk_tier) == 1
+        assert result.by_risk_tier[0].risk_tier == "routine"
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_resolved_only(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test resolved_only filter."""
+        _, _, _, clusters, _ = mock_collections
+
+        # Mock data with all resolved conflicts
+        mock_data = [
+            {
+                "_id": "routine",
+                "total_conflicts": 5,
+                "resolved_conflicts": 5,
+                "resolution_times": [2.0, 3.0, 2.5, 1.5, 4.0],
+                "resolution_types": ["merged"] * 5,
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            resolved_only=True,
+        )
+
+        assert result.by_risk_tier[0].total_conflicts == 5
+        assert result.by_risk_tier[0].resolved_conflicts == 5
+        assert result.by_risk_tier[0].resolution_rate == 1.0
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_exceeds_max_range(
+        self,
+        analytics_service,
+    ):
+        """Test that exceeding max time range raises ValueError."""
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            await analytics_service.compute_conflict_resolution_metrics(
+                workspace_id="W123",
+                start_date=datetime(2026, 1, 1),
+                end_date=datetime(2026, 6, 1),  # 151 days
+            )
+
+    @pytest.mark.asyncio
+    async def test_compute_conflict_resolution_metrics_no_resolution_times(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test handling conflicts with no resolution times."""
+        _, _, _, clusters, _ = mock_collections
+
+        # Mock data with unresolved conflicts (no resolution times)
+        mock_data = [
+            {
+                "_id": "routine",
+                "total_conflicts": 5,
+                "resolved_conflicts": 0,
+                "resolution_times": [],
+                "resolution_types": [],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        clusters.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_conflict_resolution_metrics(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+        )
+
+        routine = result.by_risk_tier[0]
+        assert routine.avg_resolution_time_hours == 0.0
+        assert routine.median_resolution_time_hours == 0.0
+        assert routine.min_resolution_time_hours == 0.0
+        assert routine.max_resolution_time_hours == 0.0
+
+    def test_conflict_resolution_stats_model(self):
+        """Test ConflictResolutionStats model validation."""
+        from integritykit.models.analytics import ConflictResolutionStats
+
+        stats = ConflictResolutionStats(
+            risk_tier="routine",
+            total_conflicts=20,
+            resolved_conflicts=15,
+            resolution_rate=0.75,
+            avg_resolution_time_hours=3.5,
+            median_resolution_time_hours=3.0,
+            min_resolution_time_hours=1.0,
+            max_resolution_time_hours=8.5,
+            resolution_methods={
+                "merged": 10,
+                "one_correct": 3,
+                "both_valid": 2,
+            },
+        )
+
+        assert stats.risk_tier == "routine"
+        assert stats.total_conflicts == 20
+        assert stats.resolved_conflicts == 15
+        assert stats.resolution_rate == 0.75
+        assert stats.avg_resolution_time_hours == 3.5
+        assert stats.resolution_methods["merged"] == 10
+
+    def test_conflict_resolution_metrics_response_model(self):
+        """Test ConflictResolutionMetricsResponse model."""
+        from integritykit.models.analytics import (
+            ConflictResolutionMetricsResponse,
+            ConflictResolutionStats,
+        )
+
+        stats = [
+            ConflictResolutionStats(
+                risk_tier="routine",
+                total_conflicts=10,
+                resolved_conflicts=8,
+                resolution_rate=0.8,
+                avg_resolution_time_hours=2.5,
+                median_resolution_time_hours=2.0,
+                min_resolution_time_hours=1.0,
+                max_resolution_time_hours=5.0,
+                resolution_methods={"merged": 6, "one_correct": 2},
+            ),
+        ]
+
+        response = ConflictResolutionMetricsResponse(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            by_risk_tier=stats,
+            summary={
+                "total_conflicts": 10,
+                "total_resolved": 8,
+                "overall_resolution_rate": 0.8,
+            },
+        )
+
+        assert response.workspace_id == "W123"
+        assert len(response.by_risk_tier) == 1
+        assert response.summary["total_conflicts"] == 10
