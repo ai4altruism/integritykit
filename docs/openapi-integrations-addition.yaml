@@ -1,0 +1,1225 @@
+# ============================================================================
+# EXTERNAL INTEGRATIONS (v1.0) - Sprint 8
+# ============================================================================
+# Add these endpoints to docs/openapi.yaml after the Languages section
+# and before the # COMPONENTS section
+
+  # ============================================================================
+  # EXTERNAL INTEGRATIONS (v1.0)
+  # ============================================================================
+
+  /integrations/webhooks:
+    get:
+      tags: [Integrations]
+      summary: List configured webhooks (v1.0)
+      description: |
+        List all configured webhooks for external system integrations.
+        Shows webhook status, event types, and delivery statistics.
+        Requires workspace_admin role.
+      operationId: listWebhooks
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: enabled
+          in: query
+          schema:
+            type: boolean
+          description: Filter by enabled status
+      responses:
+        "200":
+          description: List of configured webhooks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Webhook"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      tags: [Integrations]
+      summary: Create webhook (v1.0)
+      description: |
+        Register a new webhook endpoint for external system notifications.
+        Webhooks are triggered on specified events (e.g., cop_update.published).
+        Requires workspace_admin role.
+      operationId: createWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url, events]
+              properties:
+                name:
+                  type: string
+                  description: Descriptive webhook name
+                  minLength: 3
+                  maxLength: 100
+                url:
+                  type: string
+                  format: uri
+                  description: Target webhook URL (must be HTTPS in production)
+                events:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - cop_update.published
+                      - cop_candidate.verified
+                      - cop_candidate.promoted
+                      - cluster.created
+                  description: Event types to trigger webhook
+                  minItems: 1
+                auth_type:
+                  type: string
+                  enum: [none, bearer, basic, custom_header]
+                  default: none
+                  description: Authentication type for webhook
+                auth_config:
+                  type: object
+                  description: |
+                    Authentication configuration:
+                    - bearer: {"token": "your_token"}
+                    - basic: {"username": "user", "password": "pass"}
+                    - custom_header: {"header_name": "X-API-Key", "header_value": "key"}
+                retry_config:
+                  type: object
+                  properties:
+                    max_retries:
+                      type: integer
+                      default: 3
+                      minimum: 0
+                      maximum: 10
+                    retry_delay_seconds:
+                      type: integer
+                      default: 60
+                      minimum: 10
+                    backoff_multiplier:
+                      type: number
+                      default: 2.0
+                      minimum: 1.0
+                enabled:
+                  type: boolean
+                  default: true
+                  description: Enable webhook immediately
+      responses:
+        "201":
+          description: Webhook created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Webhook with same URL already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /integrations/webhooks/{webhook_id}:
+    get:
+      tags: [Integrations]
+      summary: Get webhook details (v1.0)
+      description: |
+        Retrieve detailed information about a specific webhook including
+        recent delivery history and statistics.
+      operationId: getWebhook
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      responses:
+        "200":
+          description: Webhook details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      tags: [Integrations]
+      summary: Update webhook (v1.0)
+      description: |
+        Update webhook configuration. Can modify URL, events, auth, or enable/disable.
+        Requires workspace_admin role.
+      operationId: updateWebhook
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 3
+                  maxLength: 100
+                url:
+                  type: string
+                  format: uri
+                events:
+                  type: array
+                  items:
+                    type: string
+                auth_type:
+                  type: string
+                  enum: [none, bearer, basic, custom_header]
+                auth_config:
+                  type: object
+                retry_config:
+                  type: object
+                enabled:
+                  type: boolean
+      responses:
+        "200":
+          description: Webhook updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [Integrations]
+      summary: Delete webhook (v1.0)
+      description: |
+        Delete a webhook configuration. This action cannot be undone.
+        Requires workspace_admin role.
+      operationId: deleteWebhook
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      responses:
+        "204":
+          description: Webhook deleted successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /integrations/webhooks/{webhook_id}/test:
+    post:
+      tags: [Integrations]
+      summary: Test webhook delivery (v1.0)
+      description: |
+        Send a test payload to the webhook endpoint to verify configuration.
+        Returns delivery status and response details.
+      operationId: testWebhook
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      responses:
+        "200":
+          description: Test delivery attempted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      success:
+                        type: boolean
+                      status_code:
+                        type: integer
+                      response_time_ms:
+                        type: integer
+                      response_body:
+                        type: string
+                      error:
+                        type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /integrations/webhooks/{webhook_id}/deliveries:
+    get:
+      tags: [Integrations]
+      summary: Get webhook delivery history (v1.0)
+      description: |
+        Retrieve delivery history for a webhook including successes,
+        failures, and retry attempts.
+      operationId: getWebhookDeliveries
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [success, failed, pending]
+          description: Filter by delivery status
+        - name: start_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter deliveries after this time
+      responses:
+        "200":
+          description: Webhook delivery history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WebhookDelivery"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /exports/cap/{update_id}:
+    get:
+      tags: [Integrations]
+      summary: Export COP update as CAP 1.2 XML (v1.0)
+      description: |
+        Export a published COP update in Common Alerting Protocol (CAP) 1.2 format.
+        CAP is an OASIS standard for emergency alerts and public warnings.
+
+        Only verified COP updates can be exported to CAP format. Updates with
+        unverified high-stakes items will be rejected.
+
+        **CAP 1.2 Fields Mapping:**
+        - identifier: cop-update-{update_id}
+        - sender: configurable organization identifier
+        - msgType: Update
+        - scope: Public
+        - status: Actual
+        - info.event: Derived from COP candidate type
+        - info.urgency: Mapped from risk tier
+        - info.certainty: Observed (for verified items)
+        - area: GeoJSON coordinates converted to CAP format
+      operationId: exportCAP
+      parameters:
+        - name: update_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: COP update ID or version number
+      responses:
+        "200":
+          description: CAP 1.2 XML document
+          content:
+            application/xml:
+              schema:
+                $ref: "#/components/schemas/CAPAlert"
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CAPAlert"
+              example:
+                alert:
+                  identifier: "cop-update-12345"
+                  sender: "integritykit@example.org"
+                  sent: "2026-03-10T14:30:00-00:00"
+                  status: "Actual"
+                  msgType: "Update"
+                  scope: "Public"
+                  info:
+                    category: "Shelter"
+                    event: "Shelter Closure"
+                    urgency: "Immediate"
+                    severity: "Moderate"
+                    certainty: "Observed"
+                    headline: "Shelter Alpha Closure"
+                    description: "Shelter Alpha has closed due to capacity."
+                    area:
+                      areaDesc: "Springfield"
+                      circle: "39.7817,-89.6501 0"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Update contains unverified items and cannot be exported to CAP
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /exports/edxl/{update_id}:
+    get:
+      tags: [Integrations]
+      summary: Export COP update as EDXL-DE (v1.0)
+      description: |
+        Export a published COP update in Emergency Data Exchange Language -
+        Distribution Element (EDXL-DE) format.
+
+        EDXL-DE is an OASIS standard for wrapping and routing emergency
+        information messages. The COP update content is embedded as an
+        XML content object within the EDXL-DE envelope.
+      operationId: exportEDXL
+      parameters:
+        - name: update_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: COP update ID or version number
+      responses:
+        "200":
+          description: EDXL-DE XML document
+          content:
+            application/xml:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                type: object
+                description: JSON representation of EDXL-DE structure
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /exports/geojson/{update_id}:
+    get:
+      tags: [Integrations]
+      summary: Export COP update as GeoJSON (v1.0)
+      description: |
+        Export location data from a COP update as GeoJSON FeatureCollection.
+        Compatible with mapping platforms (ArcGIS, Mapbox, Leaflet, QGIS, etc.).
+
+        Each COP candidate with location data becomes a GeoJSON Feature with:
+        - geometry: Point coordinates from location data
+        - properties: COP fields (what, when, who, so_what), verification status,
+          risk tier, and Slack permalink citations
+      operationId: exportGeoJSON
+      parameters:
+        - name: update_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: COP update ID or version number
+      responses:
+        "200":
+          description: GeoJSON FeatureCollection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeoJSONFeatureCollection"
+              example:
+                type: "FeatureCollection"
+                features:
+                  - type: "Feature"
+                    geometry:
+                      type: "Point"
+                      coordinates: [-89.6501, 39.7817]
+                    properties:
+                      id: "candidate-12345"
+                      what: "Shelter Alpha closure"
+                      where: "123 Main St, Springfield"
+                      when: "2026-03-10T14:30:00Z"
+                      who: "Emergency Management Agency"
+                      so_what: "Redirecting evacuees to Shelter Bravo"
+                      readiness_state: "verified"
+                      risk_tier: "elevated"
+                      citations:
+                        - "https://slack.com/archives/C123/p1234567890"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /integrations/sources:
+    get:
+      tags: [Integrations]
+      summary: List external verification sources (v1.0)
+      description: |
+        List configured external verification sources (government APIs,
+        NGO feeds, verified reporter systems). These sources can provide
+        pre-verified data for import into COP candidates.
+        Requires facilitator or workspace_admin role.
+      operationId: listExternalSources
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PerPageParam"
+        - name: source_type
+          in: query
+          schema:
+            type: string
+            enum: [government_api, ngo_feed, verified_reporter, other]
+          description: Filter by source type
+        - name: enabled
+          in: query
+          schema:
+            type: boolean
+          description: Filter by enabled status
+      responses:
+        "200":
+          description: List of external sources
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ExternalVerificationSource"
+                  meta:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      tags: [Integrations]
+      summary: Register external verification source (v1.0)
+      description: |
+        Register a new external source for importing verified data.
+        Requires workspace_admin role.
+
+        **Trust Levels:**
+        - high: Automatically promote imported data to verified candidates
+        - medium: Import as in_review candidates requiring facilitator review
+        - low: Import as signals requiring full verification workflow
+      operationId: createExternalSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, source_type, endpoint, trust_level]
+              properties:
+                name:
+                  type: string
+                  minLength: 3
+                  maxLength: 100
+                  description: Source name (e.g., "FEMA Incident API")
+                source_type:
+                  type: string
+                  enum: [government_api, ngo_feed, verified_reporter, other]
+                  description: Type of external source
+                endpoint:
+                  type: string
+                  format: uri
+                  description: API endpoint URL
+                auth_config:
+                  type: object
+                  description: |
+                    Authentication configuration for API:
+                    - bearer: {"token": "your_token"}
+                    - oauth2: {"client_id": "...", "client_secret": "...", "token_url": "..."}
+                trust_level:
+                  type: string
+                  enum: [high, medium, low]
+                  description: Trust level for automatic import
+                enabled:
+                  type: boolean
+                  default: true
+                sync_interval_minutes:
+                  type: integer
+                  minimum: 5
+                  default: 60
+                  description: How often to sync data (0 = manual only)
+      responses:
+        "201":
+          description: External source registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalVerificationSourceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /integrations/sources/{source_id}/import:
+    post:
+      tags: [Integrations]
+      summary: Import verified data from external source (v1.0)
+      description: |
+        Manually trigger import of verified data from an external source.
+        Creates new COP candidates marked as externally verified.
+        Requires facilitator role.
+
+        **Import Process:**
+        1. Fetch data from external source API
+        2. Transform to COP candidate format
+        3. Check for duplicates
+        4. Create candidates with appropriate readiness state based on trust level
+        5. Log provenance to external source
+      operationId: importFromExternalSource
+      parameters:
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                start_time:
+                  type: string
+                  format: date-time
+                  description: Import data after this time
+                end_time:
+                  type: string
+                  format: date-time
+                  description: Import data before this time
+                auto_promote:
+                  type: boolean
+                  default: false
+                  description: Automatically promote imported data to candidates
+                filters:
+                  type: object
+                  description: Source-specific filters (e.g., incident type, severity)
+      responses:
+        "200":
+          description: Import initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      import_id:
+                        type: string
+                        format: objectid
+                      status:
+                        type: string
+                        enum: [pending, in_progress, completed, failed]
+                      items_fetched:
+                        type: integer
+                      items_imported:
+                        type: integer
+                      duplicates_skipped:
+                        type: integer
+                      candidates_created:
+                        type: integer
+                      started_at:
+                        type: string
+                        format: date-time
+                      completed_at:
+                        type: string
+                        format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /integrations/health:
+    get:
+      tags: [Integrations]
+      summary: Get integration health summary (v1.0)
+      description: |
+        Retrieve health metrics for all external integrations including
+        webhook success rates, external source sync status, and recent errors.
+        Provides operational visibility into integration reliability.
+        Requires facilitator role.
+      operationId: getIntegrationHealth
+      responses:
+        "200":
+          description: Integration health summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/IntegrationHealth"
+              example:
+                data:
+                  webhooks:
+                    total_active: 3
+                    success_rate_24h: 0.98
+                    failed_deliveries_24h: 2
+                    last_failure:
+                      webhook_id: "webhook-123"
+                      timestamp: "2026-03-10T14:25:00Z"
+                      error: "Connection timeout"
+                  external_sources:
+                    total_active: 2
+                    last_sync: "2026-03-10T14:00:00Z"
+                    items_imported_24h: 15
+                    sync_errors_24h: 0
+                  exports:
+                    cap_exports_24h: 5
+                    geojson_exports_24h: 12
+                    export_failures_24h: 0
+                  overall_status: "healthy"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+# ============================================================================
+# SCHEMA ADDITIONS FOR INTEGRATIONS (v1.0)
+# ============================================================================
+# Add these schemas to the components.schemas section in openapi.yaml
+
+    # ========================================================================
+    # INTEGRATION SCHEMAS (v1.0)
+    # ========================================================================
+
+    Webhook:
+      type: object
+      required:
+        - id
+        - name
+        - url
+        - events
+        - auth_type
+        - enabled
+        - created_at
+      properties:
+        id:
+          type: string
+          format: objectid
+        name:
+          type: string
+          description: Descriptive webhook name
+        url:
+          type: string
+          format: uri
+          description: Target webhook URL
+        events:
+          type: array
+          items:
+            type: string
+          description: Event types that trigger this webhook
+        auth_type:
+          type: string
+          enum: [none, bearer, basic, custom_header]
+          description: Authentication type
+        auth_config:
+          type: object
+          description: Authentication configuration (sensitive fields redacted in responses)
+        retry_config:
+          type: object
+          properties:
+            max_retries:
+              type: integer
+            retry_delay_seconds:
+              type: integer
+            backoff_multiplier:
+              type: number
+        enabled:
+          type: boolean
+          description: Whether webhook is active
+        statistics:
+          type: object
+          properties:
+            total_deliveries:
+              type: integer
+            successful_deliveries:
+              type: integer
+            failed_deliveries:
+              type: integer
+            success_rate:
+              type: number
+              format: float
+            last_success_at:
+              type: string
+              format: date-time
+            last_failure_at:
+              type: string
+              format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    WebhookResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/Webhook"
+
+    WebhookDelivery:
+      type: object
+      required:
+        - id
+        - webhook_id
+        - event_type
+        - status
+        - timestamp
+      properties:
+        id:
+          type: string
+          format: objectid
+        webhook_id:
+          type: string
+          format: objectid
+        event_type:
+          type: string
+          description: Type of event that triggered webhook
+        payload:
+          type: object
+          description: Webhook payload sent
+        status:
+          type: string
+          enum: [success, failed, pending, retrying]
+        http_status_code:
+          type: integer
+          description: HTTP response code from webhook endpoint
+        response_time_ms:
+          type: integer
+          description: Response time in milliseconds
+        response_body:
+          type: string
+          description: Response body from webhook endpoint
+        error_message:
+          type: string
+          description: Error message if delivery failed
+        retry_count:
+          type: integer
+          description: Number of retry attempts
+        timestamp:
+          type: string
+          format: date-time
+          description: When delivery was attempted
+
+    CAPAlert:
+      type: object
+      description: |
+        Common Alerting Protocol (CAP) 1.2 alert structure.
+        See http://docs.oasis-open.org/emergency/cap/v1.2/
+      required:
+        - identifier
+        - sender
+        - sent
+        - status
+        - msgType
+        - scope
+      properties:
+        identifier:
+          type: string
+          description: Unique alert identifier
+        sender:
+          type: string
+          description: Alert sender identifier
+        sent:
+          type: string
+          format: date-time
+          description: Time and date of alert creation
+        status:
+          type: string
+          enum: [Actual, Exercise, System, Test, Draft]
+          description: Alert status
+        msgType:
+          type: string
+          enum: [Alert, Update, Cancel, Ack, Error]
+          description: Message type
+        source:
+          type: string
+          description: Source of the alert
+        scope:
+          type: string
+          enum: [Public, Restricted, Private]
+          description: Distribution scope
+        restriction:
+          type: string
+          description: Restriction for restricted scope
+        addresses:
+          type: string
+          description: Distribution addresses for private scope
+        code:
+          type: array
+          items:
+            type: string
+          description: Special handling codes
+        note:
+          type: string
+          description: Clarifying note
+        references:
+          type: string
+          description: References to previous alerts
+        incidents:
+          type: string
+          description: Related incident identifiers
+        info:
+          type: array
+          items:
+            type: object
+            properties:
+              language:
+                type: string
+              category:
+                type: array
+                items:
+                  type: string
+                  enum: [Geo, Met, Safety, Security, Rescue, Fire, Health, Env, Transport, Infra, CBRNE, Other]
+              event:
+                type: string
+              responseType:
+                type: array
+                items:
+                  type: string
+              urgency:
+                type: string
+                enum: [Immediate, Expected, Future, Past, Unknown]
+              severity:
+                type: string
+                enum: [Extreme, Severe, Moderate, Minor, Unknown]
+              certainty:
+                type: string
+                enum: [Observed, Likely, Possible, Unlikely, Unknown]
+              audience:
+                type: string
+              eventCode:
+                type: array
+                items:
+                  type: object
+              effective:
+                type: string
+                format: date-time
+              onset:
+                type: string
+                format: date-time
+              expires:
+                type: string
+                format: date-time
+              senderName:
+                type: string
+              headline:
+                type: string
+              description:
+                type: string
+              instruction:
+                type: string
+              web:
+                type: string
+                format: uri
+              contact:
+                type: string
+              parameter:
+                type: array
+                items:
+                  type: object
+              resource:
+                type: array
+                items:
+                  type: object
+              area:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    areaDesc:
+                      type: string
+                    polygon:
+                      type: string
+                    circle:
+                      type: string
+                    geocode:
+                      type: array
+                      items:
+                        type: object
+                    altitude:
+                      type: number
+                    ceiling:
+                      type: number
+
+    GeoJSONFeatureCollection:
+      type: object
+      required:
+        - type
+        - features
+      properties:
+        type:
+          type: string
+          enum: [FeatureCollection]
+        features:
+          type: array
+          items:
+            type: object
+            required:
+              - type
+              - geometry
+              - properties
+            properties:
+              type:
+                type: string
+                enum: [Feature]
+              id:
+                type: string
+                description: COP candidate ID
+              geometry:
+                type: object
+                required:
+                  - type
+                  - coordinates
+                properties:
+                  type:
+                    type: string
+                    enum: [Point, LineString, Polygon]
+                  coordinates:
+                    type: array
+                    description: GeoJSON coordinates [lon, lat] or array of coordinates
+              properties:
+                type: object
+                description: COP candidate fields and metadata
+                properties:
+                  id:
+                    type: string
+                  what:
+                    type: string
+                  where:
+                    type: string
+                  when:
+                    type: string
+                    format: date-time
+                  who:
+                    type: string
+                  so_what:
+                    type: string
+                  readiness_state:
+                    type: string
+                  risk_tier:
+                    type: string
+                  citations:
+                    type: array
+                    items:
+                      type: string
+                      format: uri
+
+    ExternalVerificationSource:
+      type: object
+      required:
+        - id
+        - name
+        - source_type
+        - endpoint
+        - trust_level
+        - enabled
+        - created_at
+      properties:
+        id:
+          type: string
+          format: objectid
+        name:
+          type: string
+          description: Source name
+        source_type:
+          type: string
+          enum: [government_api, ngo_feed, verified_reporter, other]
+          description: Type of external source
+        endpoint:
+          type: string
+          format: uri
+          description: API endpoint URL
+        auth_config:
+          type: object
+          description: Authentication configuration (redacted)
+        trust_level:
+          type: string
+          enum: [high, medium, low]
+          description: Trust level for automatic import
+        enabled:
+          type: boolean
+        sync_interval_minutes:
+          type: integer
+          description: Sync frequency (0 = manual only)
+        statistics:
+          type: object
+          properties:
+            total_imports:
+              type: integer
+            items_imported:
+              type: integer
+            candidates_created:
+              type: integer
+            last_sync_at:
+              type: string
+              format: date-time
+            last_sync_status:
+              type: string
+              enum: [success, failed, in_progress]
+            last_error:
+              type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ExternalVerificationSourceResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/ExternalVerificationSource"
+
+    IntegrationHealth:
+      type: object
+      properties:
+        webhooks:
+          type: object
+          properties:
+            total_active:
+              type: integer
+              description: Number of enabled webhooks
+            total_deliveries_24h:
+              type: integer
+            successful_deliveries_24h:
+              type: integer
+            failed_deliveries_24h:
+              type: integer
+            success_rate_24h:
+              type: number
+              format: float
+              description: Success rate (0.0 to 1.0)
+            avg_response_time_ms:
+              type: integer
+            last_failure:
+              type: object
+              properties:
+                webhook_id:
+                  type: string
+                  format: objectid
+                webhook_name:
+                  type: string
+                timestamp:
+                  type: string
+                  format: date-time
+                error:
+                  type: string
+        external_sources:
+          type: object
+          properties:
+            total_active:
+              type: integer
+              description: Number of enabled sources
+            last_sync:
+              type: string
+              format: date-time
+              description: Most recent successful sync
+            items_imported_24h:
+              type: integer
+            candidates_created_24h:
+              type: integer
+            sync_errors_24h:
+              type: integer
+            sources_with_errors:
+              type: array
+              items:
+                type: object
+                properties:
+                  source_id:
+                    type: string
+                    format: objectid
+                  source_name:
+                    type: string
+                  last_error:
+                    type: string
+                  error_timestamp:
+                    type: string
+                    format: date-time
+        exports:
+          type: object
+          properties:
+            cap_exports_24h:
+              type: integer
+            edxl_exports_24h:
+              type: integer
+            geojson_exports_24h:
+              type: integer
+            export_failures_24h:
+              type: integer
+            avg_export_time_ms:
+              type: integer
+        overall_status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          description: |
+            Overall integration health:
+            - healthy: All systems operational
+            - degraded: Some failures but within acceptable limits
+            - unhealthy: Critical failures or high error rate
