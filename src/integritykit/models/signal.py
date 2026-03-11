@@ -232,6 +232,16 @@ class Signal(BaseModel):
         default=False,
         description="Whether this signal has been redacted",
     )
+    detected_language: Optional[str] = Field(
+        default=None,
+        description="Auto-detected language of signal text (v1.0, ISO 639-1 code)",
+    )
+    language_confidence: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score for language detection (v1.0)",
+    )
     created_at: datetime = Field(
         default_factory=datetime.utcnow,
         description="When signal was created in system",
