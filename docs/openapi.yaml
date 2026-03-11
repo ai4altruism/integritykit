@@ -2,13 +2,13 @@ openapi: "3.1.0"
 
 info:
   title: Aid Arena Integrity Kit API
-  version: "1.1.0"
+  version: "1.0.0"
   description: |
     REST API for the Aid Arena Integrity Kit facilitator workflow.
 
     Provides endpoints for managing the Common Operating Picture (COP) workflow,
     including backlog management, candidate verification, COP drafting/publishing,
-    search, metrics, and audit logging.
+    search, metrics, audit logging, and multi-language support.
 
     **Authentication:** All endpoints require valid Slack OAuth authentication.
 
@@ -18,7 +18,15 @@ info:
     - Verifier: Verification actions on candidates
     - Workspace Admin: User and role management
 
-    **v1.1.0 Updates (v0.4.0):**
+    **v1.0.0 Updates:**
+    - Multi-language support (English, Spanish, French)
+    - Automatic language detection for signals
+    - Language preference configuration per user
+    - Language-specific COP draft generation
+    - Advanced analytics and reporting (separate endpoints)
+    - External system integrations (webhooks, CAP, EDXL-DE, GeoJSON)
+
+    **v0.4.0 Updates:**
     - Added user suspension and reinstatement endpoints
     - Added two-person approval workflow endpoints
     - Enhanced security with rate limiting and CORS configuration
@@ -50,12 +58,16 @@ tags:
     description: Facilitator search across signals, clusters, and candidates
   - name: Metrics
     description: Operational metrics and reporting
+  - name: Analytics
+    description: Advanced analytics and reporting (v1.0)
   - name: Audit
     description: Audit log access and compliance reporting
   - name: Users
     description: User and role management
   - name: Approvals
     description: Two-person approval workflow for high-stakes operations (v0.4.0)
+  - name: Languages
+    description: Multi-language support and language preference management (v1.0)
 
 security:
   - slackOAuth: []
@@ -985,6 +997,10 @@ paths:
         - Missing evidence requires acknowledgment
 
         For high-stakes overrides, may require second approver (two-person rule).
+
+        **Language Selection (v1.0):** The language parameter determines the language
+        for COP draft generation. If not specified, uses the facilitator's preference
+        or auto-detects from signal languages.
       operationId: publishCop
       requestBody:
         required: true
@@ -997,6 +1013,9 @@ paths:
                 slack_channel_id:
                   type: string
                   description: Slack channel to post COP update
+                language:
+                  $ref: "#/components/schemas/LanguageCode"
+                  description: Target language for COP update (v1.0). Defaults to user preference.
                 overrides:
                   type: array
                   items:
@@ -1190,13 +1209,13 @@ paths:
           schema:
             type: string
             format: date-time
-          description: Metrics calculation start time (default: 24 hours ago)
+          description: "Metrics calculation start time (default: 24 hours ago)"
         - name: end_time
           in: query
           schema:
             type: string
             format: date-time
-          description: Metrics calculation end time (default: now)
+          description: "Metrics calculation end time (default: now)"
       responses:
         "200":
           description: Operational metrics summary
@@ -1254,6 +1273,354 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  # ============================================================================
+  # ADVANCED ANALYTICS (v1.0)
+  # ============================================================================
+
+  /analytics/time-series:
+    get:
+      tags: [Analytics]
+      summary: Get time-series analytics data (v1.0)
+      description: |
+        Retrieve time-series data for signal volume, readiness state transitions,
+        and facilitator activity over time. Supports multiple granularity levels
+        (hour, day, week) for trend analysis.
+
+        **Use cases:**
+        - Signal ingestion rate monitoring
+        - Readiness progression tracking
+        - Workflow bottleneck identification
+        - Capacity planning
+
+        Requires facilitator role.
+      operationId: getTimeSeriesAnalytics
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Start of time range for analysis
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: End of time range for analysis
+        - name: granularity
+          in: query
+          schema:
+            type: string
+            enum: [hour, day, week]
+            default: day
+          description: Time bucket granularity for aggregation
+        - name: metrics
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [signal_volume, readiness_transitions, facilitator_actions]
+          description: Which metrics to include (comma-separated)
+        - name: facilitator_id
+          in: query
+          schema:
+            type: string
+            format: objectid
+          description: Filter by specific facilitator
+      responses:
+        "200":
+          description: Time-series analytics data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TimeSeriesAnalyticsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /analytics/trends:
+    get:
+      tags: [Analytics]
+      summary: Get topic trend analysis (v1.0)
+      description: |
+        Analyze topic clustering trends over time to identify emerging topics
+        (increasing signal volume) and declining topics (decreasing activity).
+
+        Uses LLM-based topic clustering to detect thematic shifts in signal content.
+
+        **Trend indicators:**
+        - Emerging: Significant increase in signal volume for topic
+        - Declining: Significant decrease in signal volume for topic
+        - Stable: Consistent signal volume
+        - New: Topic first appeared in time range
+        - Peaked: Topic reached maximum volume and declining
+
+        Requires facilitator role.
+      operationId: getTopicTrends
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Start of time range for trend analysis
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: End of time range for trend analysis
+        - name: min_signals
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 5
+          description: Minimum signal count for topic to be included
+        - name: direction
+          in: query
+          schema:
+            type: string
+            enum: [emerging, declining, all]
+            default: all
+          description: Filter by trend direction
+        - name: topic_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/TopicType"
+          description: Filter by topic type
+      responses:
+        "200":
+          description: Topic trend analysis results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopicTrendsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /analytics/facilitator-workload:
+    get:
+      tags: [Analytics]
+      summary: Get facilitator workload analytics (v1.0)
+      description: |
+        Analyze facilitator performance and workload distribution metrics.
+
+        **Metrics provided:**
+        - Total actions by facilitator
+        - Average time per candidate
+        - Actions by type (promote, verify, publish, etc.)
+        - Readiness state transition velocity
+        - Conflict resolution rate
+        - High-stakes override frequency
+
+        Useful for:
+        - Workload balancing
+        - Training needs identification
+        - Performance benchmarking
+        - Bottleneck detection
+
+        Requires facilitator role.
+      operationId: getFacilitatorWorkload
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Start of time range for analysis
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: End of time range for analysis
+        - name: facilitator_id
+          in: query
+          schema:
+            type: string
+            format: objectid
+          description: "Filter by specific facilitator (default: all)"
+        - name: include_inactive
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Include facilitators with zero actions in time range
+      responses:
+        "200":
+          description: Facilitator workload analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FacilitatorWorkloadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /analytics/conflict-resolution:
+    get:
+      tags: [Analytics]
+      summary: Get conflict resolution metrics (v1.0)
+      description: |
+        Analyze conflict detection and resolution time metrics by risk tier.
+
+        **Metrics provided:**
+        - Average time from conflict detection to resolution
+        - Resolution success rate
+        - Conflict resolution methods used
+        - Conflicts by risk tier
+        - Unresolved conflict trends
+
+        Helps identify:
+        - Process bottlenecks
+        - Risk tier handling effectiveness
+        - Training needs for conflict resolution
+
+        Requires facilitator role.
+      operationId: getConflictResolutionMetrics
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Start of time range for analysis
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: End of time range for analysis
+        - name: risk_tier
+          in: query
+          schema:
+            $ref: "#/components/schemas/RiskTier"
+          description: Filter by risk tier
+        - name: resolved_only
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Include only resolved conflicts
+      responses:
+        "200":
+          description: Conflict resolution metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictResolutionMetricsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /analytics/reports/export:
+    post:
+      tags: [Analytics]
+      summary: Generate and export after-action report (v1.0)
+      description: |
+        Generate comprehensive after-action report for a specified time period.
+        Report includes:
+
+        - Executive summary with key metrics
+        - Time-series charts for signal volume and readiness progression
+        - Topic trend analysis with visualizations
+        - Facilitator performance summary
+        - Conflict resolution analysis
+        - Key events timeline
+        - Recommendations for process improvement
+
+        **Export formats:**
+        - JSON: Raw data for custom analysis
+        - CSV: Tabular data for spreadsheet analysis
+        - PDF: Formatted report with charts (executive briefing)
+        - DOCX: Editable document for stakeholder reports
+
+        Report generation is asynchronous. Returns a job ID for status polling
+        and eventual download link.
+
+        Requires facilitator role.
+      operationId: exportAfterActionReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportExportRequest"
+      responses:
+        "202":
+          description: Report generation job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportExportResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /analytics/reports/{job_id}:
+    get:
+      tags: [Analytics]
+      summary: Get report generation status (v1.0)
+      description: |
+        Check status of asynchronous report generation job.
+
+        **Job statuses:**
+        - pending: Job queued but not started
+        - processing: Report being generated
+        - completed: Report ready for download
+        - failed: Report generation failed
+        - expired: Download link expired (after 24 hours)
+
+        When status is "completed", response includes download URL.
+      operationId: getReportStatus
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: Report generation job ID
+      responses:
+        "200":
+          description: Report generation status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   # ============================================================================
   # AUDIT LOG
@@ -1322,6 +1689,171 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  # ============================================================================
+  # LANGUAGE CONFIGURATION (v1.0)
+  # ============================================================================
+
+  /languages:
+    get:
+      tags: [Languages]
+      summary: List supported languages (v1.0)
+      description: |
+        Retrieve list of languages supported by the system for COP generation
+        and multi-language processing. Returns language codes with metadata
+        about translation quality and availability.
+      operationId: listLanguages
+      security: []  # Public endpoint
+      responses:
+        "200":
+          description: List of supported languages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Language"
+              example:
+                data:
+                  - code: "en"
+                    name: "English"
+                    native_name: "English"
+                    enabled: true
+                    quality_score: 1.0
+                  - code: "es"
+                    name: "Spanish"
+                    native_name: "Español"
+                    enabled: true
+                    quality_score: 0.95
+                  - code: "fr"
+                    name: "French"
+                    native_name: "Français"
+                    enabled: true
+                    quality_score: 0.95
+
+  /users/{user_id}/language-preference:
+    get:
+      tags: [Languages]
+      summary: Get user's language preference (v1.0)
+      description: |
+        Retrieve the language preference for a specific user.
+        Used for determining default language for COP drafts and system messages.
+        Requires the user to be viewing their own preference or workspace_admin role.
+      operationId: getUserLanguagePreference
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: User ID
+      responses:
+        "200":
+          description: User's language preference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LanguagePreferenceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      tags: [Languages]
+      summary: Set user's language preference (v1.0)
+      description: |
+        Update the language preference for a specific user.
+        This sets the default language for COP drafts, system messages,
+        and Block Kit templates. Users can only update their own preference.
+      operationId: setUserLanguagePreference
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: User ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [language_code]
+              properties:
+                language_code:
+                  $ref: "#/components/schemas/LanguageCode"
+                auto_detect_override:
+                  type: boolean
+                  default: false
+                  description: If true, always use preferred language regardless of signal language
+      responses:
+        "200":
+          description: Language preference updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LanguagePreferenceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /signals/{signal_id}/detect-language:
+    post:
+      tags: [Languages]
+      summary: Detect language of a signal (v1.0)
+      description: |
+        Manually trigger language detection for a specific signal.
+        Useful for reprocessing signals or overriding automatic detection.
+        Returns detected language with confidence score.
+        Requires facilitator role.
+      operationId: detectSignalLanguage
+      parameters:
+        - name: signal_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: objectid
+          description: Signal ID
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force_language:
+                  $ref: "#/components/schemas/LanguageCode"
+                  description: Optional manual override to set language without detection
+      responses:
+        "200":
+          description: Language detection result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LanguageDetectionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
 # ==============================================================================
 # COMPONENTS
@@ -1528,6 +2060,145 @@ components:
           $ref: "#/components/schemas/TwoPersonApproval"
 
     # ========================================================================
+    # LANGUAGE SCHEMAS (v1.0)
+    # ========================================================================
+
+    LanguageCode:
+      type: string
+      enum:
+        - en
+        - es
+        - fr
+      description: |
+        ISO 639-1 language code:
+        - en: English
+        - es: Spanish (Español)
+        - fr: French (Français)
+
+    Language:
+      type: object
+      required:
+        - code
+        - name
+        - native_name
+        - enabled
+      properties:
+        code:
+          $ref: "#/components/schemas/LanguageCode"
+        name:
+          type: string
+          description: Language name in English
+          example: "Spanish"
+        native_name:
+          type: string
+          description: Language name in native script
+          example: "Español"
+        enabled:
+          type: boolean
+          description: Whether this language is currently enabled
+        quality_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: LLM translation quality score (1.0 = native quality)
+          example: 0.95
+        supports_cop_generation:
+          type: boolean
+          description: Whether COP draft generation is available in this language
+          default: true
+        supports_wording_guidance:
+          type: boolean
+          description: Whether language-specific hedged phrasing is available
+          default: true
+
+    LanguagePreference:
+      type: object
+      required:
+        - user_id
+        - language_code
+      properties:
+        user_id:
+          type: string
+          format: objectid
+        language_code:
+          $ref: "#/components/schemas/LanguageCode"
+        auto_detect_override:
+          type: boolean
+          default: false
+          description: If true, always use preferred language regardless of signal language
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    LanguagePreferenceResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/LanguagePreference"
+
+    LanguageDetectionResult:
+      type: object
+      required:
+        - detected_language
+        - confidence
+      properties:
+        detected_language:
+          $ref: "#/components/schemas/LanguageCode"
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Confidence score for language detection
+          example: 0.92
+        alternative_languages:
+          type: array
+          items:
+            type: object
+            properties:
+              language_code:
+                $ref: "#/components/schemas/LanguageCode"
+              confidence:
+                type: number
+                format: float
+          description: Alternative language candidates with their confidence scores
+        detection_method:
+          type: string
+          enum:
+            - langdetect
+            - openai_classification
+            - manual_override
+          description: Method used for language detection
+        meets_threshold:
+          type: boolean
+          description: Whether confidence meets the configured threshold
+        threshold:
+          type: number
+          format: float
+          description: Configured confidence threshold
+          example: 0.8
+
+    LanguageDetectionResponse:
+      type: object
+      properties:
+        data:
+          allOf:
+            - type: object
+              properties:
+                signal_id:
+                  type: string
+                  format: objectid
+                original_text:
+                  type: string
+                  description: First 200 characters of signal text
+                  maxLength: 200
+            - $ref: "#/components/schemas/LanguageDetectionResult"
+
+    # ========================================================================
     # CLUSTER SCHEMAS
     # ========================================================================
 
@@ -1634,6 +2305,16 @@ components:
         permalink:
           type: string
           format: uri
+        detected_language:
+          $ref: "#/components/schemas/LanguageCode"
+          description: Auto-detected language of signal text (v1.0)
+        language_confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Confidence score for language detection (v1.0)
+          example: 0.92
         reactions:
           type: array
           items:
@@ -1899,6 +2580,14 @@ components:
           items:
             type: string
           description: Field names that are missing or weak
+        target_language:
+          $ref: "#/components/schemas/LanguageCode"
+          description: Target language for COP draft generation (v1.0)
+        source_languages:
+          type: array
+          items:
+            $ref: "#/components/schemas/LanguageCode"
+          description: Languages detected in source signals (v1.0)
         recommended_action:
           $ref: "#/components/schemas/RecommendedAction"
         draft_wording:
@@ -2038,6 +2727,9 @@ components:
         slack_permalink:
           type: string
           format: uri
+        language:
+          $ref: "#/components/schemas/LanguageCode"
+          description: Language of this COP update (v1.0)
         metrics:
           type: object
           properties:
@@ -2301,6 +2993,526 @@ components:
               enum: [json, csv]
             size_bytes:
               type: integer
+
+
+    # ========================================================================
+    # ANALYTICS SCHEMAS (v1.0)
+    # ========================================================================
+
+    TimeSeriesDataPoint:
+      type: object
+      required:
+        - timestamp
+        - value
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          description: Time bucket timestamp
+        value:
+          type: number
+          description: Metric value for this time bucket
+        metadata:
+          type: object
+          description: Additional context for this data point
+          properties:
+            count:
+              type: integer
+            breakdown:
+              type: object
+
+    TimeSeriesAnalyticsResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            time_range:
+              type: object
+              properties:
+                start_date:
+                  type: string
+                  format: date-time
+                end_date:
+                  type: string
+                  format: date-time
+                granularity:
+                  type: string
+                  enum: [hour, day, week]
+            signal_volume:
+              type: object
+              description: Signal ingestion over time
+              properties:
+                series:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TimeSeriesDataPoint"
+                total:
+                  type: integer
+                average_per_period:
+                  type: number
+                peak_timestamp:
+                  type: string
+                  format: date-time
+                peak_value:
+                  type: number
+            readiness_transitions:
+              type: object
+              description: Candidate readiness state changes over time
+              properties:
+                to_verified:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TimeSeriesDataPoint"
+                to_in_review:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TimeSeriesDataPoint"
+                to_blocked:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TimeSeriesDataPoint"
+                average_time_to_verified_hours:
+                  type: number
+            facilitator_actions:
+              type: object
+              description: Facilitator activity over time
+              properties:
+                series:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TimeSeriesDataPoint"
+                by_action_type:
+                  type: object
+                  additionalProperties:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TimeSeriesDataPoint"
+
+    TrendDirection:
+      type: string
+      enum:
+        - emerging
+        - declining
+        - stable
+        - new
+        - peaked
+      description: |
+        Trend direction indicators:
+        - emerging: Significant increase in activity
+        - declining: Significant decrease in activity
+        - stable: Consistent activity level
+        - new: First appeared in time range
+        - peaked: Reached maximum and now declining
+
+    TopicTrend:
+      type: object
+      required:
+        - topic
+        - direction
+        - signal_count
+        - first_seen
+      properties:
+        topic:
+          type: string
+          description: Topic name or keyword cluster
+        topic_type:
+          $ref: "#/components/schemas/TopicType"
+        direction:
+          $ref: "#/components/schemas/TrendDirection"
+        signal_count:
+          type: integer
+          description: Total signals in this topic during time range
+        volume_change_pct:
+          type: number
+          description: Percentage change in signal volume (positive = increase)
+        first_seen:
+          type: string
+          format: date-time
+          description: First signal timestamp for this topic
+        peak_time:
+          type: string
+          format: date-time
+          description: Timestamp of maximum signal volume
+        peak_volume:
+          type: integer
+          description: Maximum signals in a single time bucket
+        keywords:
+          type: array
+          items:
+            type: string
+          description: Representative keywords for this topic
+        related_clusters:
+          type: array
+          items:
+            type: string
+            format: objectid
+          description: Cluster IDs associated with this topic
+        velocity_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Rate of change indicator (0 = stable, 1 = rapid change)
+
+    TopicTrendsResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            time_range:
+              type: object
+              properties:
+                start_date:
+                  type: string
+                  format: date-time
+                end_date:
+                  type: string
+                  format: date-time
+            trends:
+              type: array
+              items:
+                $ref: "#/components/schemas/TopicTrend"
+            summary:
+              type: object
+              properties:
+                total_topics:
+                  type: integer
+                emerging_count:
+                  type: integer
+                declining_count:
+                  type: integer
+                new_topics_count:
+                  type: integer
+                most_active_topic:
+                  type: string
+
+    FacilitatorWorkload:
+      type: object
+      required:
+        - user_id
+        - total_actions
+      properties:
+        user_id:
+          type: string
+          format: objectid
+        user_name:
+          type: string
+          description: Facilitator display name
+        total_actions:
+          type: integer
+          description: Total actions in time range
+        actions_by_type:
+          type: object
+          description: Breakdown of action types
+          properties:
+            promote:
+              type: integer
+            verify:
+              type: integer
+            publish:
+              type: integer
+            merge:
+              type: integer
+            resolve_conflict:
+              type: integer
+            override:
+              type: integer
+        candidates_handled:
+          type: integer
+          description: Number of unique candidates touched
+        average_time_per_candidate_hours:
+          type: number
+          description: Average time from candidate creation to final action
+        readiness_velocity:
+          type: object
+          description: Speed of readiness state transitions
+          properties:
+            to_verified_avg_hours:
+              type: number
+            to_in_review_avg_hours:
+              type: number
+        conflict_resolution_rate:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Ratio of conflicts resolved to conflicts encountered
+        high_stakes_overrides:
+          type: integer
+          description: Number of high-stakes approval overrides
+        publish_count:
+          type: integer
+          description: Number of COP updates published
+        active_days:
+          type: integer
+          description: Number of days with at least one action
+        workload_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Normalized workload indicator (0 = light, 1 = heavy)
+
+    FacilitatorWorkloadResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            time_range:
+              type: object
+              properties:
+                start_date:
+                  type: string
+                  format: date-time
+                end_date:
+                  type: string
+                  format: date-time
+            facilitators:
+              type: array
+              items:
+                $ref: "#/components/schemas/FacilitatorWorkload"
+            summary:
+              type: object
+              properties:
+                total_facilitators:
+                  type: integer
+                total_actions:
+                  type: integer
+                average_actions_per_facilitator:
+                  type: number
+                most_active_facilitator:
+                  type: string
+                workload_distribution:
+                  type: object
+                  description: Statistical distribution of workload
+                  properties:
+                    min:
+                      type: integer
+                    max:
+                      type: integer
+                    median:
+                      type: number
+                    std_dev:
+                      type: number
+
+    ConflictResolutionMetrics:
+      type: object
+      properties:
+        time_range:
+          type: object
+          properties:
+            start_date:
+              type: string
+              format: date-time
+            end_date:
+              type: string
+              format: date-time
+        by_risk_tier:
+          type: object
+          properties:
+            routine:
+              $ref: "#/components/schemas/ConflictResolutionStats"
+            elevated:
+              $ref: "#/components/schemas/ConflictResolutionStats"
+            high_stakes:
+              $ref: "#/components/schemas/ConflictResolutionStats"
+        overall:
+          $ref: "#/components/schemas/ConflictResolutionStats"
+        resolution_methods:
+          type: object
+          description: How conflicts were resolved
+          properties:
+            merge:
+              type: integer
+            primary_selected:
+              type: integer
+            both_disproven:
+              type: integer
+            escalated:
+              type: integer
+            deferred:
+              type: integer
+        trend:
+          type: object
+          description: Conflict resolution trend over time
+          properties:
+            conflicts_per_day:
+              type: array
+              items:
+                $ref: "#/components/schemas/TimeSeriesDataPoint"
+            resolution_time_trend:
+              type: array
+              items:
+                type: object
+                properties:
+                  date:
+                    type: string
+                    format: date-time
+                  average_hours:
+                    type: number
+
+    ConflictResolutionStats:
+      type: object
+      properties:
+        total_conflicts:
+          type: integer
+        resolved_conflicts:
+          type: integer
+        unresolved_conflicts:
+          type: integer
+        resolution_rate:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        average_resolution_time_hours:
+          type: number
+        median_resolution_time_hours:
+          type: number
+        min_resolution_time_hours:
+          type: number
+        max_resolution_time_hours:
+          type: number
+
+    ConflictResolutionMetricsResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/ConflictResolutionMetrics"
+
+    ReportExportRequest:
+      type: object
+      required:
+        - start_date
+        - end_date
+        - format
+      properties:
+        start_date:
+          type: string
+          format: date-time
+          description: Start of reporting period
+        end_date:
+          type: string
+          format: date-time
+          description: End of reporting period
+        format:
+          type: string
+          enum: [json, csv, pdf, docx]
+          description: Export format
+        include_sections:
+          type: array
+          items:
+            type: string
+            enum:
+              - executive_summary
+              - signal_volume_chart
+              - readiness_progression
+              - topic_trends
+              - facilitator_performance
+              - conflict_resolution
+              - key_events_timeline
+              - recommendations
+          description: "Which report sections to include (default: all)"
+        facilitator_ids:
+          type: array
+          items:
+            type: string
+            format: objectid
+          description: Filter report to specific facilitators
+        include_raw_data:
+          type: boolean
+          default: false
+          description: Include raw data appendix (JSON/CSV only)
+        language:
+          type: string
+          enum: [en, es, fr]
+          default: en
+          description: Report language (v1.0)
+
+    ReportExportResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            job_id:
+              type: string
+              format: objectid
+              description: Job ID for status polling
+            status:
+              type: string
+              enum: [pending, processing]
+              description: Initial job status
+            estimated_completion_time:
+              type: string
+              format: date-time
+              description: Estimated completion time
+            status_url:
+              type: string
+              format: uri
+              description: URL to poll for job status
+
+    ReportStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - completed
+        - failed
+        - expired
+      description: |
+        Report generation job status:
+        - pending: Job queued but not started
+        - processing: Report being generated
+        - completed: Report ready for download
+        - failed: Report generation failed
+        - expired: Download link expired (after 24 hours)
+
+    ReportStatusResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            job_id:
+              type: string
+              format: objectid
+            status:
+              $ref: "#/components/schemas/ReportStatus"
+            created_at:
+              type: string
+              format: date-time
+            started_at:
+              type: string
+              format: date-time
+            completed_at:
+              type: string
+              format: date-time
+            progress_pct:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Completion percentage for processing jobs
+            download_url:
+              type: string
+              format: uri
+              description: Download URL (available when status is completed)
+            download_expires_at:
+              type: string
+              format: date-time
+              description: When download link expires
+            file_size_bytes:
+              type: integer
+              description: Size of generated report file
+            format:
+              type: string
+              enum: [json, csv, pdf, docx]
+            error_message:
+              type: string
+              description: Error details if status is failed
 
     # ========================================================================
     # AUDIT LOG SCHEMAS
