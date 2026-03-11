@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from integritykit.api.routes import (
+    analytics,
     audit,
     backlog,
     candidates,
@@ -20,6 +21,7 @@ from integritykit.api.routes import (
     publish,
     search,
     users,
+    webhooks,
 )
 from integritykit.config import settings
 from integritykit.services.database import close_mongodb_connection, connect_to_mongodb
@@ -184,6 +186,8 @@ app.include_router(candidates.router, prefix="/api/v1")
 app.include_router(drafts.router, prefix="/api/v1")
 app.include_router(publish.router, prefix="/api/v1")
 app.include_router(metrics.router, prefix="/api/v1")
+app.include_router(analytics.router, prefix="/api/v1")
+app.include_router(webhooks.router, prefix="/api/v1")
 
 # Mount static files for dashboard
 static_dir = Path(__file__).parent.parent / "static"

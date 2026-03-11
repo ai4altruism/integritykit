@@ -158,6 +158,62 @@ class Settings(BaseSettings):
         description="Enable API rate limiting",
     )
 
+    # Analytics settings (S8-9)
+    analytics_retention_days: int = Field(
+        default=365,
+        description="How long to retain analytics data in days",
+    )
+    analytics_cache_ttl_seconds: int = Field(
+        default=300,
+        description="Cache TTL for analytics queries in seconds",
+    )
+    max_analytics_time_range_days: int = Field(
+        default=90,
+        description="Maximum time range for single analytics query in days",
+    )
+
+    # Multi-language configuration (S8-2, v1.0)
+    supported_languages: str = Field(
+        default="en,es,fr",
+        description="Comma-separated list of supported language codes",
+    )
+    default_language: str = Field(
+        default="en",
+        description="Default language for system messages",
+    )
+    language_detection_enabled: bool = Field(
+        default=True,
+        description="Enable automatic language detection",
+    )
+    language_detection_confidence_threshold: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confidence for auto-detection (0.0-1.0)",
+    )
+
+    # Webhook settings (S8-17, FR-INT-001)
+    webhooks_enabled: bool = Field(
+        default=True,
+        description="Enable outbound webhook system",
+    )
+    webhook_timeout_seconds: int = Field(
+        default=10,
+        description="Timeout for webhook HTTP requests in seconds",
+    )
+    webhook_max_retries: int = Field(
+        default=3,
+        description="Maximum retry attempts for failed webhooks",
+    )
+    webhook_retry_delay_seconds: int = Field(
+        default=60,
+        description="Initial delay before retry in seconds",
+    )
+    webhook_backoff_multiplier: float = Field(
+        default=2.0,
+        description="Exponential backoff multiplier for retries",
+    )
+
     @property
     def monitored_channels_list(self) -> Optional[list[str]]:
         """Parse monitored channels from comma-separated string.
