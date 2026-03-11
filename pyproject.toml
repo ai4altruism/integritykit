@@ -32,6 +32,7 @@ dependencies = [
     "httpx>=0.26.0",
     "python-dotenv>=1.0.0",
     "structlog>=24.1.0",
+    "langdetect>=1.0.9",
 ]
 
 [project.optional-dependencies]
@@ -90,5 +91,5 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["motor.*", "chromadb.*", "slack_bolt.*", "slack_sdk.*"]
+module = ["motor.*", "chromadb.*", "slack_bolt.*", "slack_sdk.*", "langdetect.*"]
 ignore_missing_imports = true
