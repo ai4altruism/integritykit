@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+  <identifier>cop-update-65e3f1234567890abcdef012</identifier>
+  <sender>integritykit@aidarena.org</sender>
+  <sent>2026-03-10T14:30:00+00:00</sent>
+  <status>Actual</status>
+  <msgType>Update</msgType>
+  <scope>Public</scope>
+  <info>
+    <language>en-US</language>
+    <category>Safety</category>
+    <category>Infra</category>
+    <event>Shelter Status Update</event>
+    <urgency>Expected</urgency>
+    <severity>Moderate</severity>
+    <certainty>Observed</certainty>
+    <effective>2026-03-10T14:30:00+00:00</effective>
+    <senderName>Aid Arena Integrity Kit</senderName>
+    <headline>Shelter Status Update</headline>
+    <description>[VERIFIED] Shelter Alpha at 123 Main St has reached capacity and is no longer accepting new evacuees.</description>
+    <web>https://slack.com/archives/C123456/p1234567892</web>
+    <area>
+      <areaDesc>Area of operations</areaDesc>
+    </area>
+  </info>
+  <info>
+    <language>en-US</language>
+    <category>Safety</category>
+    <category>Infra</category>
+    <event>Shelter Status Update</event>
+    <urgency>Expected</urgency>
+    <severity>Moderate</severity>
+    <certainty>Likely</certainty>
+    <effective>2026-03-10T14:30:00+00:00</effective>
+    <senderName>Aid Arena Integrity Kit</senderName>
+    <headline>Shelter Status Update</headline>
+    <description>[IN REVIEW] Shelter Bravo at 456 Oak Ave is now open and accepting evacuees.</description>
+    <web>https://slack.com/archives/C123456/p1234567892</web>
+    <area>
+      <areaDesc>Area of operations</areaDesc>
+    </area>
+  </info>
+</alert>

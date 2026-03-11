@@ -21,6 +21,8 @@ from integritykit.models.analytics import (
     ReadinessTransitionDataPoint,
     SignalVolumeDataPoint,
     TimeSeriesAnalyticsRequest,
+    TopicTrend,
+    TrendDirection,
 )
 from integritykit.services.analytics import AnalyticsService
 
@@ -636,3 +638,460 @@ class TestAnalyticsModels:
         assert MetricType.SIGNAL_VOLUME.value == "signal_volume"
         assert MetricType.READINESS_TRANSITIONS.value == "readiness_transitions"
         assert MetricType.FACILITATOR_ACTIONS.value == "facilitator_actions"
+
+
+class TestTopicTrendAnalytics:
+    """Test suite for topic trend detection (S8-10)."""
+
+    @pytest.fixture
+    def mock_collections(self):
+        """Mock MongoDB collections for trends."""
+        signals = MagicMock()
+        candidates = MagicMock()
+        audit_log = MagicMock()
+        clusters = MagicMock()
+        return signals, candidates, audit_log, clusters
+
+    @pytest.fixture
+    def analytics_service(self, mock_collections):
+        """Create AnalyticsService with mocked collections."""
+        signals, candidates, audit_log, clusters = mock_collections
+        return AnalyticsService(
+            signals_collection=signals,
+            candidates_collection=candidates,
+            audit_log_collection=audit_log,
+            clusters_collection=clusters,
+            max_time_range_days=90,
+            retention_days=365,
+        )
+
+    def test_classify_trend_direction_emerging(self, analytics_service):
+        """Test trend classification for emerging topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=10,
+            current_count=15,
+            volume_change_pct=50.0,
+            first_seen=datetime(2026, 3, 1),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.EMERGING
+
+    def test_classify_trend_direction_declining(self, analytics_service):
+        """Test trend classification for declining topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=20,
+            current_count=10,
+            volume_change_pct=-50.0,
+            first_seen=datetime(2026, 3, 1),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.PEAKED
+
+    def test_classify_trend_direction_stable(self, analytics_service):
+        """Test trend classification for stable topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=10,
+            current_count=11,
+            volume_change_pct=10.0,
+            first_seen=datetime(2026, 3, 1),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.STABLE
+
+    def test_classify_trend_direction_new(self, analytics_service):
+        """Test trend classification for new topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=0,
+            current_count=10,
+            volume_change_pct=100.0,
+            first_seen=datetime(2026, 3, 15),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.NEW
+
+    def test_classify_trend_direction_peaked(self, analytics_service):
+        """Test trend classification for peaked topics."""
+        direction = analytics_service._classify_trend_direction(
+            previous_count=30,
+            current_count=10,
+            volume_change_pct=-66.7,
+            first_seen=datetime(2026, 2, 1),
+            start_date=datetime(2026, 3, 1),
+        )
+        assert direction == TrendDirection.PEAKED
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_empty(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test topic trends computation with no data."""
+        signals, _, _, _ = mock_collections
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator([])
+
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=5,
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.trends) == 0
+        assert result.summary["total_topics"] == 0
+        assert result.summary["emerging_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_with_data(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test topic trends computation with mock data."""
+        signals, _, _, _ = mock_collections
+
+        # Mock aggregation result with trending topics
+        mock_data = [
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Flood in Northern Region",
+                    "topic_type": "incident",
+                },
+                "periods": [
+                    {
+                        "period": "previous",
+                        "count": 5,
+                        "first_seen": datetime(2026, 3, 1),
+                        "last_seen": datetime(2026, 3, 15),
+                    },
+                    {
+                        "period": "current",
+                        "count": 15,
+                        "first_seen": datetime(2026, 3, 16),
+                        "last_seen": datetime(2026, 3, 31),
+                    },
+                ],
+                "total_signals": 20,
+                "keywords": ["flood", "northern"],
+            },
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Food Distribution Center",
+                    "topic_type": "resource_offer",
+                },
+                "periods": [
+                    {
+                        "period": "previous",
+                        "count": 10,
+                        "first_seen": datetime(2026, 3, 1),
+                        "last_seen": datetime(2026, 3, 15),
+                    },
+                    {
+                        "period": "current",
+                        "count": 9,
+                        "first_seen": datetime(2026, 3, 16),
+                        "last_seen": datetime(2026, 3, 31),
+                    },
+                ],
+                "total_signals": 19,
+                "keywords": ["food", "distribution"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=5,
+        )
+
+        assert result.workspace_id == "W123"
+        assert len(result.trends) == 2
+
+        # First trend should be emerging (5 -> 15 = 200% increase)
+        trend1 = result.trends[0]
+        assert trend1.topic == "Flood in Northern Region"
+        assert trend1.direction == TrendDirection.EMERGING
+        assert trend1.signal_count == 20
+        assert trend1.volume_change_pct == 200.0
+
+        # Second trend should be stable (10 -> 9 = -10% decrease)
+        trend2 = result.trends[1]
+        assert trend2.topic == "Food Distribution Center"
+        assert trend2.direction == TrendDirection.STABLE
+        assert trend2.signal_count == 19
+
+        # Summary statistics
+        assert result.summary["total_topics"] == 2
+        assert result.summary["emerging_count"] == 1
+        assert result.summary["stable_count"] == 1
+        assert result.summary["most_active_topic"] == "Flood in Northern Region"
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_filter_by_direction(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test filtering trends by direction."""
+        signals, _, _, _ = mock_collections
+
+        mock_data = [
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Emerging Topic",
+                    "topic_type": "incident",
+                },
+                "periods": [
+                    {"period": "previous", "count": 5, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 15, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 20,
+                "keywords": ["emerging"],
+            },
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Stable Topic",
+                    "topic_type": "need",
+                },
+                "periods": [
+                    {"period": "previous", "count": 10, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 11, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 21,
+                "keywords": ["stable"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator(mock_data)
+
+        # Filter for emerging only
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=5,
+            direction_filter="emerging",
+        )
+
+        assert len(result.trends) == 1
+        assert result.trends[0].topic == "Emerging Topic"
+        assert result.trends[0].direction == TrendDirection.EMERGING
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_filter_by_topic_type(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test filtering trends by topic type."""
+        signals, _, _, _ = mock_collections
+
+        mock_data = [
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Incident Topic",
+                    "topic_type": "incident",
+                },
+                "periods": [
+                    {"period": "previous", "count": 5, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 10, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 15,
+                "keywords": ["incident"],
+            },
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Resource Topic",
+                    "topic_type": "resource_offer",
+                },
+                "periods": [
+                    {"period": "previous", "count": 8, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 12, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 20,
+                "keywords": ["resource"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator(mock_data)
+
+        # Filter for incidents only
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=5,
+            topic_type_filter="incident",
+        )
+
+        assert len(result.trends) == 1
+        assert result.trends[0].topic == "Incident Topic"
+        assert result.trends[0].topic_type == "incident"
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_min_signals_filter(
+        self,
+        analytics_service,
+        mock_collections,
+    ):
+        """Test minimum signals filter."""
+        signals, _, _, _ = mock_collections
+
+        # This should be filtered out by the pipeline's $match on min_signals
+        mock_data = [
+            {
+                "_id": {
+                    "cluster_id": ObjectId(),
+                    "topic": "Large Topic",
+                    "topic_type": "incident",
+                },
+                "periods": [
+                    {"period": "previous", "count": 5, "first_seen": datetime(2026, 3, 1), "last_seen": datetime(2026, 3, 15)},
+                    {"period": "current", "count": 10, "first_seen": datetime(2026, 3, 16), "last_seen": datetime(2026, 3, 31)},
+                ],
+                "total_signals": 15,
+                "keywords": ["large"],
+            },
+        ]
+
+        class AsyncIterator:
+            def __init__(self, items):
+                self.items = items
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.items):
+                    raise StopAsyncIteration
+                item = self.items[self.index]
+                self.index += 1
+                return item
+
+        signals.aggregate.return_value = AsyncIterator(mock_data)
+
+        result = await analytics_service.compute_topic_trends(
+            workspace_id="W123",
+            start_date=datetime(2026, 3, 1),
+            end_date=datetime(2026, 3, 31),
+            min_signals=10,  # Only topics with >= 10 signals
+        )
+
+        assert len(result.trends) == 1
+        assert result.trends[0].signal_count >= 10
+
+    @pytest.mark.asyncio
+    async def test_compute_topic_trends_exceeds_max_range(
+        self,
+        analytics_service,
+    ):
+        """Test that exceeding max time range raises ValueError."""
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            await analytics_service.compute_topic_trends(
+                workspace_id="W123",
+                start_date=datetime(2026, 1, 1),
+                end_date=datetime(2026, 5, 1),  # 120 days
+                min_signals=5,
+            )
+
+    def test_topic_trend_model(self):
+        """Test TopicTrend model validation."""
+        trend = TopicTrend(
+            topic="Water Shortage",
+            topic_type="need",
+            direction=TrendDirection.EMERGING,
+            signal_count=25,
+            volume_change_pct=150.0,
+            first_seen=datetime(2026, 3, 1),
+            peak_time=datetime(2026, 3, 15),
+            peak_volume=15,
+            keywords=["water", "shortage", "emergency"],
+            related_clusters=["507f1f77bcf86cd799439011"],
+            velocity_score=0.85,
+        )
+
+        assert trend.topic == "Water Shortage"
+        assert trend.direction == TrendDirection.EMERGING
+        assert trend.signal_count == 25
+        assert trend.velocity_score == 0.85
+        assert len(trend.keywords) == 3
+
+    def test_trend_direction_enum_values(self):
+        """Test TrendDirection enum values."""
+        assert TrendDirection.EMERGING.value == "emerging"
+        assert TrendDirection.DECLINING.value == "declining"
+        assert TrendDirection.STABLE.value == "stable"
+        assert TrendDirection.NEW.value == "new"
+        assert TrendDirection.PEAKED.value == "peaked"

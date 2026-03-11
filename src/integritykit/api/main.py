@@ -17,6 +17,7 @@ from integritykit.api.routes import (
     backlog,
     candidates,
     drafts,
+    exports,
     metrics,
     publish,
     search,
@@ -188,6 +189,7 @@ app.include_router(publish.router, prefix="/api/v1")
 app.include_router(metrics.router, prefix="/api/v1")
 app.include_router(analytics.router, prefix="/api/v1")
 app.include_router(webhooks.router, prefix="/api/v1")
+app.include_router(exports.router)
 
 # Mount static files for dashboard
 static_dir = Path(__file__).parent.parent / "static"

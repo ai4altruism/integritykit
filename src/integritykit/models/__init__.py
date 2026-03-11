@@ -1,5 +1,17 @@
 """Pydantic models for IntegrityKit domain objects."""
 
+from integritykit.models.cap import (
+    CAPAlert,
+    CAPArea,
+    CAPCategory,
+    CAPCertainty,
+    CAPInfo,
+    CAPMsgType,
+    CAPScope,
+    CAPSeverity,
+    CAPStatus,
+    CAPUrgency,
+)
 from integritykit.models.cluster import (
     Cluster,
     ClusterCreate,
@@ -25,6 +37,16 @@ from integritykit.models.signal import (
 
 __all__ = [
     "AIFlags",
+    "CAPAlert",
+    "CAPArea",
+    "CAPCategory",
+    "CAPCertainty",
+    "CAPInfo",
+    "CAPMsgType",
+    "CAPScope",
+    "CAPSeverity",
+    "CAPStatus",
+    "CAPUrgency",
     "Cluster",
     "ClusterCreate",
     "ConflictRecord",

@@ -28,6 +28,16 @@ class MetricType(StrEnum):
     FACILITATOR_ACTIONS = "facilitator_actions"
 
 
+class TrendDirection(StrEnum):
+    """Trend direction indicators for topic analysis."""
+
+    EMERGING = "emerging"
+    DECLINING = "declining"
+    STABLE = "stable"
+    NEW = "new"
+    PEAKED = "peaked"
+
+
 class TimeSeriesDataPoint(BaseModel):
     """Single data point in a time-series."""
 
@@ -190,4 +200,85 @@ class AnalyticsAggregationConfig(BaseModel):
     cache_ttl_seconds: int = Field(
         default=300,
         description="Cache TTL for analytics queries",
+    )
+
+
+class TopicTrend(BaseModel):
+    """Topic trend analysis result.
+
+    Represents a topic identified through clustering with its trend characteristics.
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    topic: str = Field(
+        ...,
+        description="Topic name or keyword cluster",
+    )
+    topic_type: str = Field(
+        ...,
+        description="Type of topic (incident, need, resource_offer, etc.)",
+    )
+    direction: TrendDirection = Field(
+        ...,
+        description="Trend direction (emerging, declining, stable, new, peaked)",
+    )
+    signal_count: int = Field(
+        ...,
+        description="Total signals in this topic during time range",
+    )
+    volume_change_pct: float = Field(
+        ...,
+        description="Percentage change in signal volume (positive = increase)",
+    )
+    first_seen: datetime = Field(
+        ...,
+        description="First signal timestamp for this topic",
+    )
+    peak_time: datetime | None = Field(
+        default=None,
+        description="Timestamp of maximum signal volume",
+    )
+    peak_volume: int = Field(
+        default=0,
+        description="Maximum signals in a single time bucket",
+    )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Representative keywords for this topic",
+    )
+    related_clusters: list[str] = Field(
+        default_factory=list,
+        description="Cluster IDs associated with this topic",
+    )
+    velocity_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Rate of change indicator (0 = stable, 1 = rapid change)",
+    )
+
+
+class TopicTrendsResponse(BaseModel):
+    """Response containing topic trend analysis results."""
+
+    workspace_id: str = Field(
+        ...,
+        description="Slack workspace ID",
+    )
+    start_date: datetime = Field(
+        ...,
+        description="Start date of analysis period",
+    )
+    end_date: datetime = Field(
+        ...,
+        description="End date of analysis period",
+    )
+    trends: list[TopicTrend] = Field(
+        default_factory=list,
+        description="List of detected topic trends",
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Summary statistics (total_topics, emerging_count, etc.)",
     )

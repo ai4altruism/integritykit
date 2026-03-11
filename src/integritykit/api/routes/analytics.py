@@ -19,6 +19,7 @@ from integritykit.models.analytics import (
     MetricType,
     TimeSeriesAnalyticsRequest,
     TimeSeriesAnalyticsResponse,
+    TopicTrendsResponse,
 )
 from integritykit.services.analytics import (
     AnalyticsService,
@@ -281,3 +282,124 @@ async def get_facilitator_actions_time_series(
             sum(dp.action_velocity for dp in actions) / len(actions) if actions else 0
         ),
     }
+
+
+@router.get("/trends", response_model=TopicTrendsResponse)
+async def get_topic_trends(
+    user: CurrentUser,
+    _: None = RequireViewMetrics,
+    workspace_id: str = Query(..., description="Slack workspace ID"),
+    start_date: datetime | None = Query(
+        default=None,
+        description="Start date for trend analysis (defaults to 30 days ago)",
+    ),
+    end_date: datetime | None = Query(
+        default=None,
+        description="End date for trend analysis (defaults to now)",
+    ),
+    min_signals: int = Query(
+        default=5,
+        ge=1,
+        description="Minimum signal count for topic to be included",
+    ),
+    direction: str | None = Query(
+        default=None,
+        description="Filter by trend direction (emerging, declining, stable, new, peaked, all)",
+    ),
+    topic_type: str | None = Query(
+        default=None,
+        description="Filter by topic type (incident, need, resource_offer, etc.)",
+    ),
+    analytics_service: AnalyticsService = Depends(get_analytics_service_dependency),
+) -> TopicTrendsResponse:
+    """Get topic trend analysis.
+
+    Analyzes topic clustering trends over time to identify emerging topics
+    (increasing signal volume) and declining topics (decreasing activity).
+
+    Uses LLM-based topic clustering to detect thematic shifts in signal content.
+
+    Trend indicators:
+    - emerging: Significant increase in signal volume for topic (>20%)
+    - declining: Significant decrease in signal volume for topic (>20%)
+    - stable: Consistent signal volume (within ±20%)
+    - new: Topic first appeared in time range
+    - peaked: Topic reached maximum volume and now declining
+
+    Requires facilitator or workspace_admin role.
+
+    Args:
+        user: Current authenticated user
+        workspace_id: Slack workspace ID
+        start_date: Start date (defaults to 30 days ago)
+        end_date: End date (defaults to now)
+        min_signals: Minimum signal count for inclusion
+        direction: Filter by trend direction (optional)
+        topic_type: Filter by topic type (optional)
+        analytics_service: Analytics service
+
+    Returns:
+        TopicTrendsResponse with detected trends and summary
+
+    Raises:
+        HTTPException: If time range is invalid or exceeds maximum
+    """
+    now = datetime.utcnow()
+
+    if end_date is None:
+        end_date = now
+
+    if start_date is None:
+        start_date = end_date - timedelta(days=30)
+
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be before end_date",
+        )
+
+    # Validate that end_date is not in the future
+    if end_date > now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date cannot be in the future",
+        )
+
+    # Validate direction filter
+    valid_directions = ["emerging", "declining", "stable", "new", "peaked", "all"]
+    if direction and direction not in valid_directions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid direction filter. Must be one of: {', '.join(valid_directions)}",
+        )
+
+    try:
+        response = await analytics_service.compute_topic_trends(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            min_signals=min_signals,
+            direction_filter=direction,
+            topic_type_filter=topic_type,
+        )
+        return response
+    except ValueError as e:
+        logger.warning(
+            "Invalid topic trends request",
+            workspace_id=workspace_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to compute topic trends",
+            workspace_id=workspace_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to compute topic trends",
+        )

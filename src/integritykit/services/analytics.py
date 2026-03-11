@@ -18,6 +18,9 @@ from integritykit.models.analytics import (
     SignalVolumeDataPoint,
     TimeSeriesAnalyticsRequest,
     TimeSeriesAnalyticsResponse,
+    TopicTrend,
+    TopicTrendsResponse,
+    TrendDirection,
 )
 from integritykit.models.audit import AuditActionType
 from integritykit.services.database import get_collection
@@ -520,6 +523,288 @@ class AnalyticsService:
         )
 
         return response
+
+    async def compute_topic_trends(
+        self,
+        workspace_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        min_signals: int = 5,
+        direction_filter: str | None = None,
+        topic_type_filter: str | None = None,
+    ) -> TopicTrendsResponse:
+        """Compute topic trend analysis using cluster data.
+
+        Analyzes cluster data to identify emerging, declining, stable, new, and peaked topics.
+        Uses volume changes over time to classify trend directions.
+
+        Trend classification:
+        - emerging: >20% increase in signal volume
+        - declining: >20% decrease in signal volume
+        - stable: within ±20% volume change
+        - new: first appeared in time range
+        - peaked: reached maximum volume and now declining
+
+        Args:
+            workspace_id: Slack workspace ID
+            start_date: Start of analysis period
+            end_date: End of analysis period
+            min_signals: Minimum signal count for topic to be included (default: 5)
+            direction_filter: Filter by trend direction (optional)
+            topic_type_filter: Filter by topic type (optional)
+
+        Returns:
+            TopicTrendsResponse with detected trends and summary
+
+        Raises:
+            ValueError: If time range exceeds maximum
+        """
+        # Validate time range
+        time_range = (end_date - start_date).days
+        if time_range > self.max_time_range_days:
+            raise ValueError(
+                f"Time range ({time_range} days) exceeds maximum "
+                f"({self.max_time_range_days} days)"
+            )
+
+        # Calculate period boundaries for comparison
+        # Split time range into current and previous periods
+        period_duration = end_date - start_date
+        period_midpoint = start_date + (period_duration / 2)
+
+        # Build aggregation pipeline to group signals by cluster and time period
+        match_stage = {
+            "slack_workspace_id": workspace_id,
+            "created_at": {"$gte": start_date, "$lte": end_date},
+        }
+
+        # Get all clusters for this workspace with their signal counts over time
+        pipeline = [
+            {"$match": match_stage},
+            # Lookup cluster information
+            {
+                "$lookup": {
+                    "from": "clusters",
+                    "localField": "cluster_id",
+                    "foreignField": "_id",
+                    "as": "cluster_info",
+                }
+            },
+            {"$unwind": "$cluster_info"},
+            # Group by cluster and time period (current vs previous half)
+            {
+                "$group": {
+                    "_id": {
+                        "cluster_id": "$cluster_info._id",
+                        "topic": "$cluster_info.topic",
+                        "topic_type": "$cluster_info.incident_type",
+                        "period": {
+                            "$cond": [
+                                {"$lt": ["$created_at", period_midpoint]},
+                                "previous",
+                                "current",
+                            ]
+                        },
+                    },
+                    "signal_count": {"$sum": 1},
+                    "first_seen": {"$min": "$created_at"},
+                    "last_seen": {"$max": "$created_at"},
+                    "keywords": {"$addToSet": "$cluster_info.topic"},
+                }
+            },
+            # Group again by cluster to get both period counts
+            {
+                "$group": {
+                    "_id": {
+                        "cluster_id": "$_id.cluster_id",
+                        "topic": "$_id.topic",
+                        "topic_type": "$_id.topic_type",
+                    },
+                    "periods": {
+                        "$push": {
+                            "period": "$_id.period",
+                            "count": "$signal_count",
+                            "first_seen": "$first_seen",
+                            "last_seen": "$last_seen",
+                        }
+                    },
+                    "total_signals": {"$sum": "$signal_count"},
+                    "keywords": {"$first": "$keywords"},
+                }
+            },
+            # Filter by minimum signals
+            {"$match": {"total_signals": {"$gte": min_signals}}},
+            {"$sort": {"total_signals": -1}},
+        ]
+
+        trends: list[TopicTrend] = []
+        peak_volumes: dict[str, tuple[datetime, int]] = {}
+
+        # Execute aggregation
+        async for doc in self.signals.aggregate(pipeline):
+            cluster_id = str(doc["_id"]["cluster_id"])
+            topic = doc["_id"]["topic"] or "Unknown Topic"
+            topic_type = doc["_id"]["topic_type"] or "general"
+            total_signals = doc["total_signals"]
+
+            # Parse period data
+            previous_count = 0
+            current_count = 0
+            first_seen = start_date
+            last_seen = end_date
+
+            for period_data in doc["periods"]:
+                if period_data["period"] == "previous":
+                    previous_count = period_data["count"]
+                    first_seen = period_data["first_seen"]
+                elif period_data["period"] == "current":
+                    current_count = period_data["count"]
+                    last_seen = period_data["last_seen"]
+
+            # Calculate volume change percentage
+            if previous_count > 0:
+                volume_change_pct = (
+                    (current_count - previous_count) / previous_count
+                ) * 100
+            elif current_count > 0:
+                # New topic - no previous period data
+                volume_change_pct = 100.0
+            else:
+                volume_change_pct = 0.0
+
+            # Classify trend direction
+            direction = self._classify_trend_direction(
+                previous_count=previous_count,
+                current_count=current_count,
+                volume_change_pct=volume_change_pct,
+                first_seen=first_seen,
+                start_date=start_date,
+            )
+
+            # Calculate velocity score (0.0 - 1.0)
+            velocity_score = min(abs(volume_change_pct) / 100.0, 1.0)
+
+            # Determine peak time and volume by bucketing signals
+            # For now, use the midpoint as peak if current > previous, otherwise use start
+            peak_time = None
+            peak_volume = max(previous_count, current_count)
+            if current_count > previous_count:
+                peak_time = period_midpoint
+            elif previous_count > 0:
+                peak_time = start_date
+
+            # Apply filters
+            if direction_filter and direction_filter != "all":
+                if direction.value != direction_filter:
+                    continue
+
+            if topic_type_filter and topic_type != topic_type_filter:
+                continue
+
+            # Extract keywords from cluster topic
+            keywords = [topic] + (doc.get("keywords", []))
+            keywords = list(set(keywords))[:5]  # Limit to 5 unique keywords
+
+            trend = TopicTrend(
+                topic=topic,
+                topic_type=topic_type,
+                direction=direction,
+                signal_count=total_signals,
+                volume_change_pct=round(volume_change_pct, 2),
+                first_seen=first_seen,
+                peak_time=peak_time,
+                peak_volume=peak_volume,
+                keywords=keywords,
+                related_clusters=[cluster_id],
+                velocity_score=round(velocity_score, 3),
+            )
+
+            trends.append(trend)
+
+        # Calculate summary statistics
+        summary = {
+            "total_topics": len(trends),
+            "emerging_count": sum(
+                1 for t in trends if t.direction == TrendDirection.EMERGING
+            ),
+            "declining_count": sum(
+                1 for t in trends if t.direction == TrendDirection.DECLINING
+            ),
+            "stable_count": sum(
+                1 for t in trends if t.direction == TrendDirection.STABLE
+            ),
+            "new_topics_count": sum(
+                1 for t in trends if t.direction == TrendDirection.NEW
+            ),
+            "peaked_count": sum(
+                1 for t in trends if t.direction == TrendDirection.PEAKED
+            ),
+        }
+
+        if trends:
+            most_active = max(trends, key=lambda t: t.signal_count)
+            summary["most_active_topic"] = most_active.topic
+            summary["most_active_signal_count"] = most_active.signal_count
+
+        logger.info(
+            "Computed topic trends",
+            workspace_id=workspace_id,
+            trends_count=len(trends),
+            emerging=summary["emerging_count"],
+            declining=summary["declining_count"],
+            new=summary["new_topics_count"],
+        )
+
+        return TopicTrendsResponse(
+            workspace_id=workspace_id,
+            start_date=start_date,
+            end_date=end_date,
+            trends=trends,
+            summary=summary,
+        )
+
+    def _classify_trend_direction(
+        self,
+        previous_count: int,
+        current_count: int,
+        volume_change_pct: float,
+        first_seen: datetime,
+        start_date: datetime,
+    ) -> TrendDirection:
+        """Classify trend direction based on volume changes.
+
+        Args:
+            previous_count: Signal count in previous period
+            current_count: Signal count in current period
+            volume_change_pct: Percentage change in volume
+            first_seen: First signal timestamp
+            start_date: Analysis start date
+
+        Returns:
+            TrendDirection classification
+        """
+        # New topic - first appeared in time range
+        if previous_count == 0 and current_count > 0:
+            return TrendDirection.NEW
+
+        # Peaked - had activity before, declining now
+        if previous_count > current_count and previous_count > 0:
+            # If significant decline, mark as peaked
+            if volume_change_pct < -20:
+                return TrendDirection.PEAKED
+            # Minor decline, still stable
+            return TrendDirection.STABLE
+
+        # Emerging - significant increase
+        if volume_change_pct > 20:
+            return TrendDirection.EMERGING
+
+        # Declining - significant decrease
+        if volume_change_pct < -20:
+            return TrendDirection.DECLINING
+
+        # Stable - within ±20%
+        return TrendDirection.STABLE
 
 
 # Global service instance
