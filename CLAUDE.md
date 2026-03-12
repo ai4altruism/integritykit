@@ -138,18 +138,37 @@ GEOJSON_EXPORT_ENABLED=true
 
 ## Resume Instructions
 
+**Last updated:** 2026-03-11
+**Last commit:** `db4145c feat(sprint8): implement S8-14, S8-15 after-action reports`
+
 To continue Sprint 8 development:
 
 1. Check out the sprint branch: `git checkout sprint-8/v1.0-features`
 2. Pull latest: `git pull origin sprint-8/v1.0-features`
-3. Review remaining tasks above
-4. Priority order: S8-13 (dashboard), S8-14 (reports), then documentation
+3. Run tests to verify state: `python -m pytest tests/unit/ -v --tb=short`
+4. Review remaining tasks below
+
+### Recommended Next Tasks (in priority order)
+
+| Task | Description | Size | Agent |
+|------|-------------|------|-------|
+| S8-23 | Integration tests (webhooks, CAP, EDXL, GeoJSON) | S | test-engineer |
+| S8-22 | Integration health monitoring dashboard | M | python-backend |
+| S8-30-36 | Documentation updates | S each | technical-writer |
+| S8-13 | Analytics dashboard with visualizations | XL | data-viz-builder |
+
+### Context-Saving Tips
+- Work in small partitions to avoid context overload
+- Complete one task fully before starting another
+- Commit after each task completion
+- Run `python -m pytest tests/unit/ -v` to verify tests pass
 
 ## Agent Usage
 
 Key agents for remaining work:
-- `data-viz-builder` - S8-13 analytics dashboard
-- `python-backend` - S8-14 report export
+- `test-engineer` - S8-23, S8-29 unit/integration tests
+- `python-backend` - S8-22 health monitoring
 - `technical-writer` - S8-30 to S8-36 documentation
+- `data-viz-builder` - S8-13 analytics dashboard (XL task)
 - `e2e-test-engineer` - S8-37, S8-38 E2E tests
 - `deploy-engineer` - S8-40 to S8-42 security/deployment
