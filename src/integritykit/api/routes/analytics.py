@@ -14,6 +14,8 @@ from integritykit.api.dependencies import (
     CurrentUser,
     RequireViewMetrics,
 )
+from fastapi.responses import StreamingResponse
+
 from integritykit.models.analytics import (
     ConflictResolutionMetricsResponse,
     FacilitatorWorkloadResponse,
@@ -23,10 +25,16 @@ from integritykit.models.analytics import (
     TimeSeriesAnalyticsResponse,
     TopicTrendsResponse,
 )
+from integritykit.models.report import (
+    AfterActionReportRequest,
+    ReportFormat,
+    ReportSection,
+)
 from integritykit.services.analytics import (
     AnalyticsService,
     get_analytics_service_dependency,
 )
+from integritykit.services.report_export import ReportExportService
 
 logger = structlog.get_logger(__name__)
 
@@ -617,4 +625,137 @@ async def get_conflict_resolution_metrics(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to compute conflict resolution metrics",
+        )
+
+
+# =============================================================================
+# After-Action Report Export (S8-14)
+# =============================================================================
+
+
+async def get_report_service_dependency(
+    analytics_service: AnalyticsService = Depends(get_analytics_service_dependency),
+) -> ReportExportService:
+    """Dependency injection for report export service."""
+    return ReportExportService(
+        signals_collection=analytics_service.signals,
+        candidates_collection=analytics_service.candidates,
+        audit_log_collection=analytics_service.audit_log,
+        clusters_collection=analytics_service.clusters,
+        users_collection=analytics_service.users,
+    )
+
+
+@router.post("/reports/after-action")
+async def generate_after_action_report(
+    user: CurrentUser,
+    _: None = RequireViewMetrics,
+    workspace_id: str = Query(..., description="Slack workspace ID"),
+    start_date: datetime = Query(..., description="Start of reporting period"),
+    end_date: datetime = Query(..., description="End of reporting period"),
+    title: str = Query(default="After-Action Report", description="Report title"),
+    incident_name: str | None = Query(default=None, description="Incident name"),
+    format: ReportFormat = Query(default=ReportFormat.PDF, description="Output format"),
+    sections: list[ReportSection] = Query(
+        default=list(ReportSection),
+        description="Sections to include",
+    ),
+    include_charts: bool = Query(default=True, description="Include charts (PDF only)"),
+    report_service: ReportExportService = Depends(get_report_service_dependency),
+) -> StreamingResponse:
+    """Generate after-action report for incident analysis.
+
+    Creates a comprehensive report including:
+    - Executive summary with key metrics
+    - Timeline of significant events
+    - Signal analysis and volume trends
+    - Facilitator performance metrics
+    - Conflict resolution statistics
+    - Topic trend analysis
+    - Auto-generated recommendations
+
+    Available formats: PDF, DOCX
+
+    Requires facilitator or workspace_admin role with view_metrics permission.
+
+    Args:
+        user: Current authenticated user
+        workspace_id: Slack workspace ID
+        start_date: Start of reporting period
+        end_date: End of reporting period
+        title: Report title
+        incident_name: Optional incident/event name
+        format: Output format (pdf or docx)
+        sections: Sections to include in report
+        include_charts: Include visual charts (PDF only)
+        report_service: Report export service
+
+    Returns:
+        StreamingResponse with report file
+
+    Raises:
+        HTTPException: If request is invalid or generation fails
+    """
+    now = datetime.utcnow()
+
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be before end_date",
+        )
+
+    if end_date > now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date cannot be in the future",
+        )
+
+    # Create request object
+    request = AfterActionReportRequest(
+        workspace_id=workspace_id,
+        start_date=start_date,
+        end_date=end_date,
+        title=title,
+        incident_name=incident_name,
+        format=format,
+        sections=sections,
+        include_charts=include_charts,
+    )
+
+    try:
+        content, content_type = await report_service.generate_report(request)
+
+        # Determine filename
+        date_str = start_date.strftime("%Y%m%d")
+        ext = "pdf" if format == ReportFormat.PDF else "docx"
+        filename = f"after_action_report_{workspace_id}_{date_str}.{ext}"
+
+        return StreamingResponse(
+            iter([content]),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(content)),
+            },
+        )
+
+    except ValueError as e:
+        logger.warning(
+            "Invalid after-action report request",
+            workspace_id=workspace_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to generate after-action report",
+            workspace_id=workspace_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate report",
         )

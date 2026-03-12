@@ -4,7 +4,7 @@
 
 **Branch:** `sprint-8/v1.0-features`
 **Started:** 2026-03-10
-**Status:** In Progress (~60% complete)
+**Status:** In Progress (~65% complete)
 
 ### Completed Tasks
 
@@ -24,6 +24,8 @@
 - S8-10: Topic trend detection (emerging/declining/stable)
 - S8-11: Facilitator workload analytics
 - S8-12: Conflict resolution time analysis
+- S8-14: After-action report export (`src/integritykit/services/report_export.py`)
+- S8-15: Analytics tests (`tests/unit/test_analytics.py`, `tests/unit/test_report_export.py`)
 
 #### External Integrations ✅
 - S8-17: Outbound webhook system (`src/integritykit/services/webhooks.py`)
@@ -36,8 +38,6 @@
 
 #### Analytics (High Priority)
 - S8-13: Analytics dashboard with visualizations (XL task - data-viz-builder)
-- S8-14: After-action report export (PDF/DOCX)
-- S8-15: Analytics tests
 
 #### Integrations
 - S8-22: Integration health monitoring dashboard
@@ -90,6 +90,7 @@ src/integritykit/
 │   ├── external_source.py # External sources (NEW)
 │   ├── geojson.py       # GeoJSON models (NEW)
 │   ├── language.py      # Language models (NEW)
+│   ├── report.py        # After-action report models (NEW)
 │   └── webhook.py       # Webhook models (NEW)
 ├── services/
 │   ├── analytics.py     # Analytics service (UPDATED)
@@ -98,6 +99,7 @@ src/integritykit/
 │   ├── external_sources.py # External sources (NEW)
 │   ├── geojson_export.py # GeoJSON export (NEW)
 │   ├── language_detection.py # Language detection (NEW)
+│   ├── report_export.py # After-action report export (NEW)
 │   └── webhooks.py      # Webhook service (NEW)
 └── slack/
     ├── blocks.py        # Block Kit builders (UPDATED with i18n)
