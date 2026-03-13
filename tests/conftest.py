@@ -406,6 +406,7 @@ def pytest_configure(config: Any) -> None:
     Markers:
         - unit: Unit tests (isolated, fast)
         - integration: Integration tests (database, external services)
+        - e2e: End-to-end tests (complete workflows)
         - slow: Slow-running tests
         - requires_mongodb: Tests requiring MongoDB
         - requires_chromadb: Tests requiring ChromaDB
@@ -414,6 +415,7 @@ def pytest_configure(config: Any) -> None:
     config.addinivalue_line(
         "markers", "integration: Integration tests (database, external services)"
     )
+    config.addinivalue_line("markers", "e2e: End-to-end tests (complete workflows)")
     config.addinivalue_line("markers", "slow: Slow-running tests")
     config.addinivalue_line("markers", "requires_mongodb: Tests requiring MongoDB")
     config.addinivalue_line("markers", "requires_chromadb: Tests requiring ChromaDB")
