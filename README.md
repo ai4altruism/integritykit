@@ -15,8 +15,11 @@ Unlike traditional emergency management tools that require participants to file 
 - Detects duplicate reports and conflicting information
 - Surfaces a prioritized backlog of clusters for facilitator review
 - Provides a verification workflow with readiness gates for high-stakes information
-- Generates draft COP updates with verification-aware wording
+- Generates draft COP updates with verification-aware wording in multiple languages (English, Spanish, French)
 - Publishes provenance-backed updates (every claim links to source evidence)
+- Exports to standard emergency management formats (CAP 1.2, EDXL-DE, GeoJSON)
+- Integrates with external systems via webhooks and verified data sources
+- Provides advanced analytics and after-action reporting
 - Maintains full audit logging and role-based access control
 
 ### Who It's For
@@ -390,6 +393,10 @@ pytest -m unit
 | `ENVIRONMENT` | No | `development` | Environment name (development, staging, production) |
 | `LOG_LEVEL` | No | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `DATA_RETENTION_DAYS` | No | `90` | Signal retention period in days |
+| `SUPPORTED_LANGUAGES` | No | `en` | Comma-separated list of language codes (en, es, fr) |
+| `WEBHOOKS_ENABLED` | No | `false` | Enable outbound webhook notifications |
+| `CAP_EXPORT_ENABLED` | No | `false` | Enable CAP 1.2 XML export |
+| `GEOJSON_EXPORT_ENABLED` | No | `false` | Enable GeoJSON export for mapping |
 
 ### Role-Based Access Control
 
@@ -578,12 +585,25 @@ For production deployments:
 
 ## Documentation
 
+### Core Documentation
+
 - [Capability Description Document (CDD)](docs/Aid_Arena_Integrity_Kit_CDD_Ambient_v0_4.md) - Product requirements and operating concept
 - [System Requirements Specification (SRS)](docs/Aid_Arena_Integrity_Kit_SRS_Ambient_v0_4.md) - Functional and non-functional requirements
 - [Architecture Documentation](docs/architecture.md) - Detailed system architecture and design
 - [MongoDB Schema](docs/mongodb_schema.md) - Database design and schema documentation
 - [API Reference](docs/openapi.yaml) - OpenAPI 3.1 specification
 - [LLM Prompt Design](docs/prompts.md) - Prompt engineering guide and templates
+
+### v1.0 Feature Guides
+
+- [API Guide](docs/api_guide.md) - Complete API reference with examples
+- [Multi-Language Support](docs/multi-language-guide.md) - Configure and use Spanish/French COP drafts
+- [External Integrations](docs/external-integrations-guide.md) - Webhooks, CAP, EDXL-DE, GeoJSON exports
+- [Webhook System](docs/webhooks-guide.md) - Real-time event notification setup
+- [Advanced Analytics](docs/analytics-guide.md) - Metrics, reporting, and after-action analysis
+- [Analytics API Examples](docs/analytics_api_examples.md) - Code examples for analytics queries
+- [Integration Architecture](docs/integration-architecture-v1.0.md) - Technical integration design
+- [Migration Guide](docs/migration-v1.0.md) - Upgrading from v0.4.0 to v1.0
 
 ## Contributing
 
@@ -659,10 +679,27 @@ This project is funded by [funding source] and developed in partnership with cri
 - ✅ **Security hardening** - CORS, rate limiting, security headers, ReDoS protection
 - ✅ **Docker Compose** - Complete local development stack
 
-### v1.0 (Planned)
-- Multi-language support (Spanish, French)
-- Advanced analytics and reporting
-- External system integrations
+### v1.0 (Current Release - 2026-03-13)
+- **Multi-language COP drafts** - Spanish and French support with localized status labels and wording
+- **External integrations**
+  - Outbound webhooks for real-time event notifications
+  - CAP 1.2 XML export for public alerting systems
+  - EDXL-DE export for emergency management interoperability
+  - GeoJSON export for mapping platforms
+  - Inbound verification sources from authoritative APIs
+  - Integration health monitoring dashboard
+- **Advanced analytics**
+  - Signal volume time-series with channel breakdown
+  - Readiness state transition tracking
+  - Facilitator workload and action velocity metrics
+  - Topic trend detection (emerging/declining/stable)
+  - Conflict resolution time analysis
+  - After-action report export for post-incident review
+
+### v1.1 (Planned)
+- Enhanced GIS integration
+- Additional emergency management protocols (EDXL-SitRep, EDXL-HAVE)
+- Mobile-optimized interface
 
 ## Changelog
 
