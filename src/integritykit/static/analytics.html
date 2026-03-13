@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IntegrityKit Analytics Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .loading { opacity: 0.5; pointer-events: none; }
+        .card { @apply bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 transition-colors; }
+        .dark { @apply bg-gray-900 text-white; }
+        .dark .card { @apply bg-gray-800; }
+        .dark .text-gray-800 { @apply text-gray-100; }
+        .dark .text-gray-600 { @apply text-gray-300; }
+        .dark .text-gray-500 { @apply text-gray-400; }
+        .dark .border-gray-200 { @apply border-gray-700; }
+        .dark .bg-gray-100 { @apply bg-gray-900; }
+        .dark input, .dark select { @apply bg-gray-700 border-gray-600 text-white; }
+        .trend-badge { @apply text-xs px-2 py-1 rounded-full font-medium; }
+        .trend-emerging { @apply bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200; }
+        .trend-declining { @apply bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200; }
+        .trend-stable { @apply bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200; }
+        .trend-new { @apply bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200; }
+        .trend-peaked { @apply bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200; }
+        .sparkline { height: 40px; }
+        canvas { image-rendering: -webkit-optimize-contrast; }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 min-h-screen transition-colors">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="mb-8">
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-800 dark:text-white">Analytics Dashboard</h1>
+                    <p class="text-gray-600 dark:text-gray-400 mt-2">Sprint 8 time-series analytics and insights</p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="toggleDarkMode()"
+                            class="p-2 rounded-lg bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 transition">
+                        <svg id="lightIcon" class="w-5 h-5 dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path>
+                        </svg>
+                        <svg id="darkIcon" class="w-5 h-5 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="flex flex-wrap items-center gap-4 bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
+                <div class="flex items-center gap-2">
+                    <label for="workspace" class="text-sm text-gray-600 dark:text-gray-400 font-medium">Workspace:</label>
+                    <input type="text" id="workspace" value="default"
+                           class="border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <label for="startDate" class="text-sm text-gray-600 dark:text-gray-400 font-medium">Start:</label>
+                    <input type="date" id="startDate"
+                           class="border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <label for="endDate" class="text-sm text-gray-600 dark:text-gray-400 font-medium">End:</label>
+                    <input type="date" id="endDate"
+                           class="border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <label for="granularity" class="text-sm text-gray-600 dark:text-gray-400 font-medium">Granularity:</label>
+                    <select id="granularity"
+                            class="border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="hour">Hour</option>
+                        <option value="day" selected>Day</option>
+                        <option value="week">Week</option>
+                    </select>
+                </div>
+
+                <button onclick="loadAllAnalytics()"
+                        class="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 transition font-medium">
+                    Refresh
+                </button>
+
+                <div class="flex items-center gap-2">
+                    <input type="checkbox" id="autoRefresh" class="rounded">
+                    <label for="autoRefresh" class="text-sm text-gray-600 dark:text-gray-400">Auto-refresh (30s)</label>
+                </div>
+
+                <span id="lastUpdated" class="text-sm text-gray-500 dark:text-gray-400 ml-auto"></span>
+            </div>
+        </header>
+
+        <!-- Error Banner -->
+        <div id="errorBanner" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
+            <span id="errorMessage"></span>
+        </div>
+
+        <!-- Time-Series Charts -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <!-- Signal Volume Time-Series -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-lg font-semibold text-gray-800 dark:text-white">Signal Volume Over Time</h2>
+                    <button onclick="exportChartAsPNG('signalVolumeChart', 'signal_volume')"
+                            class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div class="h-64">
+                    <canvas id="signalVolumeChart"></canvas>
+                </div>
+                <div class="mt-4 text-center">
+                    <span id="totalSignals" class="text-2xl font-bold text-blue-600 dark:text-blue-400">--</span>
+                    <span class="text-sm text-gray-500 dark:text-gray-400 ml-2">total signals</span>
+                </div>
+            </div>
+
+            <!-- Facilitator Actions Time-Series -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-lg font-semibold text-gray-800 dark:text-white">Facilitator Actions Over Time</h2>
+                    <button onclick="exportChartAsPNG('facilitatorActionsChart', 'facilitator_actions')"
+                            class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div class="h-64">
+                    <canvas id="facilitatorActionsChart"></canvas>
+                </div>
+                <div class="mt-4 grid grid-cols-2 gap-4 text-center">
+                    <div>
+                        <span id="totalActions" class="text-2xl font-bold text-purple-600 dark:text-purple-400">--</span>
+                        <div class="text-sm text-gray-500 dark:text-gray-400">total actions</div>
+                    </div>
+                    <div>
+                        <span id="avgVelocity" class="text-2xl font-bold text-green-600 dark:text-green-400">--</span>
+                        <div class="text-sm text-gray-500 dark:text-gray-400">avg velocity</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Topic Trends Section -->
+        <div class="card mb-8">
+            <h2 class="text-lg font-semibold text-gray-800 dark:text-white mb-4">Topic Trends</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 mb-4">
+                <div class="bg-green-50 dark:bg-green-900/20 rounded-lg p-4 border border-green-200 dark:border-green-800">
+                    <div class="text-sm text-green-600 dark:text-green-400 font-medium">Emerging</div>
+                    <div id="emergingCount" class="text-2xl font-bold text-green-700 dark:text-green-300">--</div>
+                </div>
+                <div class="bg-red-50 dark:bg-red-900/20 rounded-lg p-4 border border-red-200 dark:border-red-800">
+                    <div class="text-sm text-red-600 dark:text-red-400 font-medium">Declining</div>
+                    <div id="decliningCount" class="text-2xl font-bold text-red-700 dark:text-red-300">--</div>
+                </div>
+                <div class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 border border-blue-200 dark:border-blue-800">
+                    <div class="text-sm text-blue-600 dark:text-blue-400 font-medium">Stable</div>
+                    <div id="stableCount" class="text-2xl font-bold text-blue-700 dark:text-blue-300">--</div>
+                </div>
+                <div class="bg-purple-50 dark:bg-purple-900/20 rounded-lg p-4 border border-purple-200 dark:border-purple-800">
+                    <div class="text-sm text-purple-600 dark:text-purple-400 font-medium">New</div>
+                    <div id="newCount" class="text-2xl font-bold text-purple-700 dark:text-purple-300">--</div>
+                </div>
+                <div class="bg-yellow-50 dark:bg-yellow-900/20 rounded-lg p-4 border border-yellow-200 dark:border-yellow-800">
+                    <div class="text-sm text-yellow-600 dark:text-yellow-400 font-medium">Peaked</div>
+                    <div id="peakedCount" class="text-2xl font-bold text-yellow-700 dark:text-yellow-300">--</div>
+                </div>
+            </div>
+
+            <!-- Topic Trends List -->
+            <div id="topicTrendsList" class="space-y-2 max-h-96 overflow-y-auto">
+                <!-- Dynamically populated -->
+            </div>
+        </div>
+
+        <!-- Facilitator Workload -->
+        <div class="card mb-8">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-semibold text-gray-800 dark:text-white">Facilitator Workload Distribution</h2>
+                <button onclick="exportChartAsPNG('workloadChart', 'facilitator_workload')"
+                        class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="h-80">
+                <canvas id="workloadChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Conflict Resolution Analytics -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <!-- Resolution Time by Risk Tier -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-lg font-semibold text-gray-800 dark:text-white">Conflict Resolution Time</h2>
+                    <button onclick="exportChartAsPNG('resolutionTimeChart', 'resolution_time')"
+                            class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div class="h-64">
+                    <canvas id="resolutionTimeChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Resolution Methods -->
+            <div class="card">
+                <h2 class="text-lg font-semibold text-gray-800 dark:text-white mb-4">Resolution Methods</h2>
+                <div class="h-64">
+                    <canvas id="resolutionMethodsChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Conflict Stats Table -->
+        <div class="card mb-8">
+            <h2 class="text-lg font-semibold text-gray-800 dark:text-white mb-4">Conflict Resolution Statistics</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left">
+                    <thead class="border-b border-gray-200 dark:border-gray-700">
+                        <tr>
+                            <th class="pb-3 text-sm font-medium text-gray-600 dark:text-gray-400">Risk Tier</th>
+                            <th class="pb-3 text-sm font-medium text-gray-600 dark:text-gray-400">Total</th>
+                            <th class="pb-3 text-sm font-medium text-gray-600 dark:text-gray-400">Resolved</th>
+                            <th class="pb-3 text-sm font-medium text-gray-600 dark:text-gray-400">Rate</th>
+                            <th class="pb-3 text-sm font-medium text-gray-600 dark:text-gray-400">Avg Time</th>
+                            <th class="pb-3 text-sm font-medium text-gray-600 dark:text-gray-400">Median</th>
+                            <th class="pb-3 text-sm font-medium text-gray-600 dark:text-gray-400">Min</th>
+                            <th class="pb-3 text-sm font-medium text-gray-600 dark:text-gray-400">Max</th>
+                        </tr>
+                    </thead>
+                    <tbody id="conflictStatsTable">
+                        <!-- Dynamically populated -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Export Section -->
+        <div class="card">
+            <h2 class="text-lg font-semibold text-gray-800 dark:text-white mb-4">Export Analytics</h2>
+            <div class="flex gap-4">
+                <button onclick="exportAnalyticsData('json')"
+                        class="bg-gray-600 text-white px-6 py-2 rounded hover:bg-gray-700 transition flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                    </svg>
+                    Export JSON
+                </button>
+                <button onclick="exportAnalyticsData('csv')"
+                        class="bg-gray-600 text-white px-6 py-2 rounded hover:bg-gray-700 transition flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                    </svg>
+                    Export CSV
+                </button>
+                <button onclick="generateAfterActionReport()"
+                        class="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 transition flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    After-Action Report (PDF)
+                </button>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="mt-8 text-center text-gray-500 dark:text-gray-400 text-sm">
+            IntegrityKit v1.0 - Aid Arena Integrity Kit
+        </footer>
+    </div>
+
+    <script>
+        // Chart instances
+        let signalVolumeChart = null;
+        let facilitatorActionsChart = null;
+        let workloadChart = null;
+        let resolutionTimeChart = null;
+        let resolutionMethodsChart = null;
+
+        // Auto-refresh timer
+        let refreshInterval = null;
+
+        // Color palette - works in both light and dark mode
+        const colors = {
+            blue: 'rgba(59, 130, 246, 0.8)',
+            green: 'rgba(34, 197, 94, 0.8)',
+            yellow: 'rgba(234, 179, 8, 0.8)',
+            red: 'rgba(239, 68, 68, 0.8)',
+            purple: 'rgba(168, 85, 247, 0.8)',
+            gray: 'rgba(107, 114, 128, 0.8)',
+            cyan: 'rgba(6, 182, 212, 0.8)',
+            pink: 'rgba(236, 72, 153, 0.8)',
+            indigo: 'rgba(99, 102, 241, 0.8)',
+            orange: 'rgba(249, 115, 22, 0.8)',
+        };
+
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeDateInputs();
+            initializeCharts();
+            loadAllAnalytics();
+            setupAutoRefresh();
+
+            // Restore dark mode preference
+            if (localStorage.getItem('darkMode') === 'true') {
+                document.documentElement.classList.add('dark');
+            }
+        });
+
+        function initializeDateInputs() {
+            const endDate = new Date();
+            const startDate = new Date();
+            startDate.setDate(startDate.getDate() - 7);
+
+            document.getElementById('endDate').valueAsDate = endDate;
+            document.getElementById('startDate').valueAsDate = startDate;
+        }
+
+        function toggleDarkMode() {
+            document.documentElement.classList.toggle('dark');
+            const isDark = document.documentElement.classList.contains('dark');
+            localStorage.setItem('darkMode', isDark);
+
+            // Update chart colors for dark mode
+            if (signalVolumeChart) {
+                updateChartForTheme(signalVolumeChart);
+                updateChartForTheme(facilitatorActionsChart);
+                updateChartForTheme(workloadChart);
+                updateChartForTheme(resolutionTimeChart);
+                updateChartForTheme(resolutionMethodsChart);
+            }
+        }
+
+        function updateChartForTheme(chart) {
+            const isDark = document.documentElement.classList.contains('dark');
+            const textColor = isDark ? '#e5e7eb' : '#374151';
+            const gridColor = isDark ? '#374151' : '#e5e7eb';
+
+            if (chart.options.scales) {
+                if (chart.options.scales.x) {
+                    chart.options.scales.x.ticks.color = textColor;
+                    chart.options.scales.x.grid.color = gridColor;
+                }
+                if (chart.options.scales.y) {
+                    chart.options.scales.y.ticks.color = textColor;
+                    chart.options.scales.y.grid.color = gridColor;
+                }
+            }
+            if (chart.options.plugins?.legend) {
+                chart.options.plugins.legend.labels.color = textColor;
+            }
+            chart.update();
+        }
+
+        function initializeCharts() {
+            const isDark = document.documentElement.classList.contains('dark');
+            const textColor = isDark ? '#e5e7eb' : '#374151';
+            const gridColor = isDark ? '#374151' : '#e5e7eb';
+
+            const commonOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: { color: textColor }
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: { color: textColor },
+                        grid: { color: gridColor }
+                    },
+                    y: {
+                        ticks: { color: textColor },
+                        grid: { color: gridColor },
+                        beginAtZero: true
+                    }
+                }
+            };
+
+            // Signal Volume Chart (Line)
+            const signalCtx = document.getElementById('signalVolumeChart').getContext('2d');
+            signalVolumeChart = new Chart(signalCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Signal Count',
+                        data: [],
+                        borderColor: colors.blue,
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    plugins: {
+                        ...commonOptions.plugins,
+                        tooltip: {
+                            callbacks: {
+                                afterLabel: function(context) {
+                                    const channels = context.raw.channels || {};
+                                    if (Object.keys(channels).length > 0) {
+                                        return Object.entries(channels)
+                                            .map(([ch, count]) => `  ${ch}: ${count}`)
+                                            .join('\n');
+                                    }
+                                    return '';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Facilitator Actions Chart (Stacked Area)
+            const actionsCtx = document.getElementById('facilitatorActionsChart').getContext('2d');
+            facilitatorActionsChart = new Chart(actionsCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: []
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            stacked: true
+                        }
+                    }
+                }
+            });
+
+            // Workload Chart (Horizontal Bar)
+            const workloadCtx = document.getElementById('workloadChart').getContext('2d');
+            workloadChart = new Chart(workloadCtx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Total Actions',
+                        data: [],
+                        backgroundColor: colors.purple
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    indexAxis: 'y',
+                    plugins: {
+                        ...commonOptions.plugins,
+                        tooltip: {
+                            callbacks: {
+                                afterLabel: function(context) {
+                                    const facilitator = context.raw.facilitator;
+                                    if (facilitator) {
+                                        return [
+                                            `Candidates: ${facilitator.candidates_processed}`,
+                                            `Avg Time: ${facilitator.average_time_per_candidate_hours.toFixed(1)}h`,
+                                            `Resolution Rate: ${(facilitator.conflict_resolution_rate * 100).toFixed(1)}%`
+                                        ].join('\n');
+                                    }
+                                    return '';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Resolution Time Chart (Box Plot approximation with error bars)
+            const resolutionCtx = document.getElementById('resolutionTimeChart').getContext('2d');
+            resolutionTimeChart = new Chart(resolutionCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['Routine', 'Elevated', 'High Stakes'],
+                    datasets: [
+                        {
+                            label: 'Average',
+                            data: [],
+                            backgroundColor: colors.blue
+                        },
+                        {
+                            label: 'Median',
+                            data: [],
+                            backgroundColor: colors.green
+                        }
+                    ]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: {
+                                display: true,
+                                text: 'Hours',
+                                color: textColor
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Resolution Methods Chart (Doughnut)
+            const methodsCtx = document.getElementById('resolutionMethodsChart').getContext('2d');
+            resolutionMethodsChart = new Chart(methodsCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Merged', 'One Correct', 'Both Valid', 'Deferred'],
+                    datasets: [{
+                        data: [0, 0, 0, 0],
+                        backgroundColor: [colors.blue, colors.green, colors.yellow, colors.gray]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: { color: textColor }
+                        }
+                    }
+                }
+            });
+        }
+
+        function setupAutoRefresh() {
+            document.getElementById('autoRefresh').addEventListener('change', (e) => {
+                if (e.target.checked) {
+                    refreshInterval = setInterval(loadAllAnalytics, 30000);
+                } else {
+                    if (refreshInterval) {
+                        clearInterval(refreshInterval);
+                        refreshInterval = null;
+                    }
+                }
+            });
+        }
+
+        async function loadAllAnalytics() {
+            hideError();
+            const container = document.querySelector('.container');
+            container.classList.add('loading');
+
+            try {
+                await Promise.all([
+                    loadSignalVolume(),
+                    loadFacilitatorActions(),
+                    loadTopicTrends(),
+                    loadFacilitatorWorkload(),
+                    loadConflictResolution()
+                ]);
+
+                document.getElementById('lastUpdated').textContent =
+                    `Last updated: ${new Date().toLocaleTimeString()}`;
+            } catch (error) {
+                console.error('Failed to load analytics:', error);
+                showError(`Failed to load analytics: ${error.message}`);
+            } finally {
+                container.classList.remove('loading');
+            }
+        }
+
+        async function loadSignalVolume() {
+            const params = getRequestParams();
+            const url = `/api/v1/analytics/signal-volume?${new URLSearchParams(params)}`;
+
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Signal volume API error: ${response.status}`);
+
+            const data = await response.json();
+
+            // Update chart
+            signalVolumeChart.data.labels = data.data.map(d =>
+                formatTimestamp(d.timestamp, params.granularity)
+            );
+            signalVolumeChart.data.datasets[0].data = data.data.map(d => ({
+                y: d.signal_count,
+                channels: d.by_channel
+            }));
+            signalVolumeChart.update();
+
+            // Update total
+            document.getElementById('totalSignals').textContent =
+                data.total_signals.toLocaleString();
+        }
+
+        async function loadFacilitatorActions() {
+            const params = getRequestParams();
+            const url = `/api/v1/analytics/facilitator-actions?${new URLSearchParams(params)}`;
+
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Facilitator actions API error: ${response.status}`);
+
+            const data = await response.json();
+
+            // Extract action types across all time periods
+            const actionTypes = new Set();
+            data.data.forEach(d => {
+                Object.keys(d.by_action_type).forEach(type => actionTypes.add(type));
+            });
+
+            // Create datasets for each action type (stacked area)
+            const actionColors = [colors.blue, colors.green, colors.purple, colors.yellow, colors.red, colors.cyan];
+            facilitatorActionsChart.data.labels = data.data.map(d =>
+                formatTimestamp(d.timestamp, params.granularity)
+            );
+            facilitatorActionsChart.data.datasets = Array.from(actionTypes).map((type, i) => ({
+                label: formatActionType(type),
+                data: data.data.map(d => d.by_action_type[type] || 0),
+                borderColor: actionColors[i % actionColors.length],
+                backgroundColor: actionColors[i % actionColors.length].replace('0.8', '0.5'),
+                fill: true,
+                tension: 0.4
+            }));
+            facilitatorActionsChart.update();
+
+            // Update totals
+            document.getElementById('totalActions').textContent =
+                data.total_actions.toLocaleString();
+            document.getElementById('avgVelocity').textContent =
+                data.avg_velocity.toFixed(1);
+        }
+
+        async function loadTopicTrends() {
+            const workspace = document.getElementById('workspace').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+
+            const params = {
+                workspace_id: workspace,
+                start_date: startDate,
+                end_date: endDate,
+                min_signals: 5
+            };
+
+            const url = `/api/v1/analytics/trends?${new URLSearchParams(params)}`;
+
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Topic trends API error: ${response.status}`);
+
+            const data = await response.json();
+
+            // Update counts
+            document.getElementById('emergingCount').textContent =
+                data.summary.emerging_count || 0;
+            document.getElementById('decliningCount').textContent =
+                data.summary.declining_count || 0;
+            document.getElementById('stableCount').textContent =
+                data.summary.stable_count || 0;
+            document.getElementById('newCount').textContent =
+                data.summary.new_count || 0;
+            document.getElementById('peakedCount').textContent =
+                data.summary.peaked_count || 0;
+
+            // Update trends list
+            const container = document.getElementById('topicTrendsList');
+            if (data.trends.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 dark:text-gray-400 text-center py-4">No topic trends detected in this time range.</p>';
+            } else {
+                container.innerHTML = data.trends.map(trend => `
+                    <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition">
+                        <div class="flex-1">
+                            <div class="flex items-center gap-2">
+                                <span class="font-medium text-gray-800 dark:text-white">${escapeHtml(trend.topic)}</span>
+                                <span class="trend-badge trend-${trend.direction}">${trend.direction}</span>
+                                <span class="text-xs text-gray-500 dark:text-gray-400">${trend.topic_type}</span>
+                            </div>
+                            <div class="text-sm text-gray-600 dark:text-gray-300 mt-1">
+                                ${trend.signal_count} signals • ${trend.volume_change_pct > 0 ? '+' : ''}${trend.volume_change_pct.toFixed(1)}% change
+                            </div>
+                            ${trend.keywords.length > 0 ? `
+                                <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                    Keywords: ${trend.keywords.join(', ')}
+                                </div>
+                            ` : ''}
+                        </div>
+                        <div class="ml-4">
+                            <div class="w-20 h-10">
+                                <canvas id="sparkline-${trend.topic.replace(/\s+/g, '-')}"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+
+                // Note: Sparklines would require additional time-series data per topic
+                // This is a simplified version
+            }
+        }
+
+        async function loadFacilitatorWorkload() {
+            const workspace = document.getElementById('workspace').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+
+            const params = {
+                workspace_id: workspace,
+                start_date: startDate,
+                end_date: endDate
+            };
+
+            const url = `/api/v1/analytics/facilitator-workload?${new URLSearchParams(params)}`;
+
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Facilitator workload API error: ${response.status}`);
+
+            const data = await response.json();
+
+            // Sort by total actions descending
+            const sorted = data.facilitators.sort((a, b) => b.total_actions - a.total_actions);
+
+            workloadChart.data.labels = sorted.map(f => f.user_name || f.user_id);
+            workloadChart.data.datasets[0].data = sorted.map(f => ({
+                y: f.total_actions,
+                facilitator: f
+            }));
+            workloadChart.update();
+        }
+
+        async function loadConflictResolution() {
+            const workspace = document.getElementById('workspace').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+
+            const params = {
+                workspace_id: workspace,
+                start_date: startDate,
+                end_date: endDate
+            };
+
+            const url = `/api/v1/analytics/conflict-resolution?${new URLSearchParams(params)}`;
+
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Conflict resolution API error: ${response.status}`);
+
+            const data = await response.json();
+
+            // Update resolution time chart
+            const tierLabels = {
+                'routine': 'Routine',
+                'elevated': 'Elevated',
+                'high_stakes': 'High Stakes'
+            };
+
+            const avgData = [];
+            const medianData = [];
+
+            ['routine', 'elevated', 'high_stakes'].forEach(tier => {
+                const stats = data.by_risk_tier.find(s => s.risk_tier === tier);
+                avgData.push(stats ? stats.avg_resolution_time_hours : 0);
+                medianData.push(stats ? stats.median_resolution_time_hours : 0);
+            });
+
+            resolutionTimeChart.data.datasets[0].data = avgData;
+            resolutionTimeChart.data.datasets[1].data = medianData;
+            resolutionTimeChart.update();
+
+            // Update resolution methods chart
+            const allMethods = {};
+            data.by_risk_tier.forEach(stats => {
+                Object.entries(stats.resolution_methods).forEach(([method, count]) => {
+                    allMethods[method] = (allMethods[method] || 0) + count;
+                });
+            });
+
+            resolutionMethodsChart.data.labels = Object.keys(allMethods).map(formatActionType);
+            resolutionMethodsChart.data.datasets[0].data = Object.values(allMethods);
+            resolutionMethodsChart.update();
+
+            // Update stats table
+            const tbody = document.getElementById('conflictStatsTable');
+            tbody.innerHTML = data.by_risk_tier.map(stats => `
+                <tr class="border-b border-gray-200 dark:border-gray-700">
+                    <td class="py-3 text-sm font-medium text-gray-800 dark:text-white">${tierLabels[stats.risk_tier] || stats.risk_tier}</td>
+                    <td class="py-3 text-sm text-gray-600 dark:text-gray-300">${stats.total_conflicts}</td>
+                    <td class="py-3 text-sm text-gray-600 dark:text-gray-300">${stats.resolved_conflicts}</td>
+                    <td class="py-3 text-sm text-gray-600 dark:text-gray-300">${(stats.resolution_rate * 100).toFixed(1)}%</td>
+                    <td class="py-3 text-sm text-gray-600 dark:text-gray-300">${stats.avg_resolution_time_hours.toFixed(1)}h</td>
+                    <td class="py-3 text-sm text-gray-600 dark:text-gray-300">${stats.median_resolution_time_hours.toFixed(1)}h</td>
+                    <td class="py-3 text-sm text-gray-600 dark:text-gray-300">${stats.min_resolution_time_hours.toFixed(1)}h</td>
+                    <td class="py-3 text-sm text-gray-600 dark:text-gray-300">${stats.max_resolution_time_hours.toFixed(1)}h</td>
+                </tr>
+            `).join('');
+        }
+
+        function getRequestParams() {
+            return {
+                workspace_id: document.getElementById('workspace').value,
+                start_date: document.getElementById('startDate').value,
+                end_date: document.getElementById('endDate').value,
+                granularity: document.getElementById('granularity').value
+            };
+        }
+
+        function formatTimestamp(timestamp, granularity) {
+            const date = new Date(timestamp);
+            switch (granularity) {
+                case 'hour':
+                    return date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' });
+                case 'day':
+                    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                case 'week':
+                    return `Week of ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+                default:
+                    return date.toLocaleDateString();
+            }
+        }
+
+        function formatActionType(actionType) {
+            return actionType.split(/[_.]/).map(word =>
+                word.charAt(0).toUpperCase() + word.slice(1)
+            ).join(' ');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function exportChartAsPNG(chartId, filename) {
+            const canvas = document.getElementById(chartId);
+            const link = document.createElement('a');
+            link.download = `${filename}_${new Date().toISOString().split('T')[0]}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+
+        async function exportAnalyticsData(format) {
+            const params = getRequestParams();
+            const workspace = params.workspace_id;
+            const filename = `analytics_${workspace}_${params.start_date}_${params.end_date}.${format}`;
+
+            try {
+                // Collect all analytics data
+                const [signals, actions, trends, workload, conflicts] = await Promise.all([
+                    fetch(`/api/v1/analytics/signal-volume?${new URLSearchParams(params)}`).then(r => r.json()),
+                    fetch(`/api/v1/analytics/facilitator-actions?${new URLSearchParams(params)}`).then(r => r.json()),
+                    fetch(`/api/v1/analytics/trends?${new URLSearchParams({ ...params, min_signals: 5 })}`).then(r => r.json()),
+                    fetch(`/api/v1/analytics/facilitator-workload?${new URLSearchParams(params)}`).then(r => r.json()),
+                    fetch(`/api/v1/analytics/conflict-resolution?${new URLSearchParams(params)}`).then(r => r.json())
+                ]);
+
+                const analyticsData = {
+                    metadata: {
+                        workspace_id: workspace,
+                        start_date: params.start_date,
+                        end_date: params.end_date,
+                        granularity: params.granularity,
+                        exported_at: new Date().toISOString()
+                    },
+                    signal_volume: signals,
+                    facilitator_actions: actions,
+                    topic_trends: trends,
+                    facilitator_workload: workload,
+                    conflict_resolution: conflicts
+                };
+
+                if (format === 'json') {
+                    const blob = new Blob([JSON.stringify(analyticsData, null, 2)], { type: 'application/json' });
+                    downloadBlob(blob, filename);
+                } else if (format === 'csv') {
+                    // Simple CSV export of signal volume
+                    const csvContent = [
+                        'Timestamp,Signal Count',
+                        ...signals.data.map(d => `${d.timestamp},${d.signal_count}`)
+                    ].join('\n');
+                    const blob = new Blob([csvContent], { type: 'text/csv' });
+                    downloadBlob(blob, filename);
+                }
+            } catch (error) {
+                showError(`Export failed: ${error.message}`);
+            }
+        }
+
+        async function generateAfterActionReport() {
+            const workspace = document.getElementById('workspace').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+
+            const params = {
+                workspace_id: workspace,
+                start_date: startDate,
+                end_date: endDate,
+                format: 'pdf',
+                include_charts: true
+            };
+
+            const url = `/api/v1/analytics/reports/after-action?${new URLSearchParams(params)}`;
+
+            try {
+                const response = await fetch(url, { method: 'POST' });
+                if (!response.ok) throw new Error(`Report generation failed: ${response.status}`);
+
+                const blob = await response.blob();
+                const filename = `after_action_report_${workspace}_${startDate}.pdf`;
+                downloadBlob(blob, filename);
+            } catch (error) {
+                showError(`Report generation failed: ${error.message}`);
+            }
+        }
+
+        function downloadBlob(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+
+        function showError(message) {
+            const banner = document.getElementById('errorBanner');
+            document.getElementById('errorMessage').textContent = message;
+            banner.classList.remove('hidden');
+        }
+
+        function hideError() {
+            document.getElementById('errorBanner').classList.add('hidden');
+        }
+    </script>
+</body>
+</html>

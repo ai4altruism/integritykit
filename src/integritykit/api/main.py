@@ -229,6 +229,7 @@ async def root() -> JSONResponse:
             "description": "Aid Arena Integrity Kit API",
             "docs_url": "/docs",
             "dashboard_url": "/dashboard",
+            "analytics_url": "/analytics",
         }
     )
 
@@ -242,3 +243,14 @@ async def dashboard() -> FileResponse:
     """
     dashboard_path = Path(__file__).parent.parent / "static" / "dashboard.html"
     return FileResponse(dashboard_path, media_type="text/html")
+
+
+@app.get("/analytics")
+async def analytics_dashboard() -> FileResponse:
+    """Serve the analytics dashboard (S8-13).
+
+    Returns:
+        FileResponse with analytics dashboard HTML
+    """
+    analytics_path = Path(__file__).parent.parent / "static" / "analytics.html"
+    return FileResponse(analytics_path, media_type="text/html")

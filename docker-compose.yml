@@ -35,6 +35,26 @@ services:
       - DEFAULT_RETENTION_DAYS=${DEFAULT_RETENTION_DAYS:-90}
       - TWO_PERSON_RULE_ENABLED=${TWO_PERSON_RULE_ENABLED:-true}
       - ABUSE_DETECTION_ENABLED=${ABUSE_DETECTION_ENABLED:-true}
+
+      # v1.0 Multi-Language Support
+      - SUPPORTED_LANGUAGES=${SUPPORTED_LANGUAGES:-en,es,fr}
+      - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-en}
+      - LANGUAGE_DETECTION_ENABLED=${LANGUAGE_DETECTION_ENABLED:-true}
+      - LANGUAGE_DETECTION_CONFIDENCE_THRESHOLD=${LANGUAGE_DETECTION_CONFIDENCE_THRESHOLD:-0.8}
+
+      # v1.0 Analytics
+      - ANALYTICS_RETENTION_DAYS=${ANALYTICS_RETENTION_DAYS:-365}
+      - MAX_ANALYTICS_TIME_RANGE_DAYS=${MAX_ANALYTICS_TIME_RANGE_DAYS:-90}
+
+      # v1.0 Webhooks
+      - WEBHOOKS_ENABLED=${WEBHOOKS_ENABLED:-true}
+      - WEBHOOK_TIMEOUT_SECONDS=${WEBHOOK_TIMEOUT_SECONDS:-10}
+      - WEBHOOK_MAX_RETRIES=${WEBHOOK_MAX_RETRIES:-3}
+
+      # v1.0 Exports
+      - CAP_EXPORT_ENABLED=${CAP_EXPORT_ENABLED:-true}
+      - EDXL_DE_EXPORT_ENABLED=${EDXL_DE_EXPORT_ENABLED:-true}
+      - GEOJSON_EXPORT_ENABLED=${GEOJSON_EXPORT_ENABLED:-true}
     depends_on:
       mongodb:
         condition: service_healthy
@@ -55,12 +75,15 @@ services:
     image: mongo:7.0
     container_name: integritykit-mongodb
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"  # Bind to localhost only for security
     volumes:
       - mongodb_data:/data/db
       - mongodb_config:/data/configdb
     environment:
       - MONGO_INITDB_DATABASE=integritykit
+      # SECURITY: For production, enable authentication
+      # - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME}
+      # - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -76,12 +99,15 @@ services:
     image: chromadb/chroma:latest
     container_name: integritykit-chromadb
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"  # Bind to localhost only for security
     volumes:
       - chromadb_data:/chroma/chroma
     environment:
       - IS_PERSISTENT=TRUE
       - ANONYMIZED_TELEMETRY=FALSE
+      # SECURITY: For production, enable authentication
+      # - CHROMA_SERVER_AUTH_CREDENTIALS=${CHROMA_AUTH_CREDENTIALS}
+      # - CHROMA_SERVER_AUTH_PROVIDER=token
     networks:
       - integritykit-network
     restart: unless-stopped
