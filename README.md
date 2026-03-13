@@ -435,12 +435,15 @@ integritykit/
 │   ├── integration/                # Database and API tests
 │   └── fixtures/                   # Test data and factories
 ├── docs/
-│   ├── Aid_Arena_Integrity_Kit_CDD_Ambient_v0_4.md
-│   ├── Aid_Arena_Integrity_Kit_SRS_Ambient_v0_4.md
-│   ├── mongodb_schema.md
-│   ├── openapi.yaml
-│   ├── prompts.md
-│   └── architecture.md
+│   ├── cdd.md                       # Capability Description Document
+│   ├── srs.md                       # System Requirements Specification
+│   ├── architecture.md              # System architecture
+│   ├── mongodb-schema.md            # Database schema
+│   ├── api-guide.md                 # API reference
+│   ├── analytics.md                 # Analytics guide
+│   ├── multi-language.md            # Multi-language support
+│   ├── external-integrations.md     # Webhooks, exports, sources
+│   └── openapi.yaml                 # OpenAPI specification
 ├── Dockerfile
 ├── pyproject.toml
 └── README.md
@@ -587,23 +590,25 @@ For production deployments:
 
 ### Core Documentation
 
-- [Capability Description Document (CDD)](docs/Aid_Arena_Integrity_Kit_CDD_Ambient_v0_4.md) - Product requirements and operating concept
-- [System Requirements Specification (SRS)](docs/Aid_Arena_Integrity_Kit_SRS_Ambient_v0_4.md) - Functional and non-functional requirements
+- [Capability Description Document (CDD)](docs/cdd.md) - Product requirements and operating concept
+- [System Requirements Specification (SRS)](docs/srs.md) - Functional and non-functional requirements
 - [Architecture Documentation](docs/architecture.md) - Detailed system architecture and design
-- [MongoDB Schema](docs/mongodb_schema.md) - Database design and schema documentation
+- [MongoDB Schema](docs/mongodb-schema.md) - Database design and schema documentation
 - [API Reference](docs/openapi.yaml) - OpenAPI 3.1 specification
 - [LLM Prompt Design](docs/prompts.md) - Prompt engineering guide and templates
 
-### v1.0 Feature Guides
+### Feature Guides
 
-- [API Guide](docs/api_guide.md) - Complete API reference with examples
-- [Multi-Language Support](docs/multi-language-guide.md) - Configure and use Spanish/French COP drafts
-- [External Integrations](docs/external-integrations-guide.md) - Webhooks, CAP, EDXL-DE, GeoJSON exports
-- [Webhook System](docs/webhooks-guide.md) - Real-time event notification setup
-- [Advanced Analytics](docs/analytics-guide.md) - Metrics, reporting, and after-action analysis
-- [Analytics API Examples](docs/analytics_api_examples.md) - Code examples for analytics queries
-- [Integration Architecture](docs/integration-architecture-v1.0.md) - Technical integration design
-- [Migration Guide](docs/migration-v1.0.md) - Upgrading from v0.4.0 to v1.0
+- [API Guide](docs/api-guide.md) - Complete API reference with examples
+- [Multi-Language Support](docs/multi-language.md) - Configure and use Spanish/French COP drafts
+- [External Integrations](docs/external-integrations.md) - Webhooks, CAP, EDXL-DE, GeoJSON exports
+- [Analytics](docs/analytics.md) - Time-series metrics, trends, and after-action reporting
+
+### Operations
+
+- [Deployment Runbook](docs/deployment-runbook.md) - Production deployment guide
+- [Migration Guide](docs/migration.md) - Upgrading from v0.4.0 to v1.0
+- [Security Review](docs/security-review.md) - Security audit and recommendations
 
 ## Contributing
 
