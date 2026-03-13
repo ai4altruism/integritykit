@@ -67,6 +67,7 @@ def make_candidate(
         readiness_state=readiness_state,
         readiness_updated_at=datetime.now(timezone.utc),
         readiness_updated_by=ObjectId(),
+        created_by=ObjectId(),
         risk_tier=risk_tier,
         fields=COPFields(
             what=what,

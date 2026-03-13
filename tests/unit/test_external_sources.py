@@ -407,7 +407,7 @@ class TestExternalSourceImport:
                 source_id=sample_external_source.id,
                 workspace_id="workspace-123",
                 import_request=ImportRequest(auto_promote=True),
-                imported_by="user-123",
+                imported_by=str(ObjectId()),
             )
 
         # Verify import results
@@ -482,7 +482,7 @@ class TestExternalSourceImport:
                 source_id=medium_source.id,
                 workspace_id="workspace-123",
                 import_request=ImportRequest(auto_promote=False),
-                imported_by="user-123",
+                imported_by=str(ObjectId()),
             )
 
         # Verify candidate has in_review state (medium trust)
@@ -537,7 +537,7 @@ class TestExternalSourceImport:
                 source_id=sample_external_source.id,
                 workspace_id="workspace-123",
                 import_request=ImportRequest(),
-                imported_by="user-123",
+                imported_by=str(ObjectId()),
             )
 
         # Verify results
@@ -558,7 +558,7 @@ class TestExternalSourceImport:
                 source_id=ObjectId(),
                 workspace_id="workspace-123",
                 import_request=ImportRequest(),
-                imported_by="user-123",
+                imported_by=str(ObjectId()),
             )
 
     async def test_import_source_disabled(
@@ -578,7 +578,7 @@ class TestExternalSourceImport:
                 source_id=sample_external_source.id,
                 workspace_id="workspace-123",
                 import_request=ImportRequest(),
-                imported_by="user-123",
+                imported_by=str(ObjectId()),
             )
 
 
