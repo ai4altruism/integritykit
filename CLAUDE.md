@@ -33,15 +33,13 @@
 - S8-19: EDXL-DE export (`src/integritykit/services/edxl_export.py`)
 - S8-20: Inbound verification sources (`src/integritykit/services/external_sources.py`)
 - S8-21: GeoJSON export (`src/integritykit/services/geojson_export.py`)
+- S8-22: Integration health monitoring (`src/integritykit/services/integration_health.py`)
 - S8-23: Integration tests (`tests/integration/test_integrations.py`)
 
 ### Remaining Tasks
 
 #### Analytics (High Priority)
 - S8-13: Analytics dashboard with visualizations (XL task - data-viz-builder)
-
-#### Integrations
-- S8-22: Integration health monitoring dashboard
 
 #### Enhancements
 - S8-24: Mobile-optimized App Home layout

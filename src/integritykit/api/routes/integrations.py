@@ -1,11 +1,12 @@
-"""API routes for integration management (Sprint 8, Task S8-20).
+"""API routes for integration management (Sprint 8, Tasks S8-20, S8-22).
 
 Implements:
 - FR-INT-003: External verification source integration
 - Task S8-20: Inbound verification source API
+- Task S8-22: Integration health monitoring dashboard
 """
 
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -20,9 +21,13 @@ from integritykit.models.external_source import (
     ImportResult,
     TrustLevel,
 )
+from integritykit.models.integration_health import (
+    IntegrationHealthDashboard,
+)
 from integritykit.models.user import User, UserRole
 from integritykit.services.database import get_collection
 from integritykit.services.external_sources import ExternalSourceService
+from integritykit.services.integration_health import IntegrationHealthService
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
 
@@ -425,3 +430,84 @@ async def import_verified_data(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Import failed: {str(e)}",
         )
+
+
+# ============================================================================
+# Health Monitoring Endpoints (S8-22)
+# ============================================================================
+
+
+class HealthDashboardResponse(BaseModel):
+    """Response model for health dashboard."""
+
+    data: IntegrationHealthDashboard
+
+
+class HealthSummaryResponse(BaseModel):
+    """Response model for health summary."""
+
+    data: dict[str, Any]
+
+
+def get_health_service() -> IntegrationHealthService:
+    """Get integration health service instance."""
+    return IntegrationHealthService(
+        webhooks_collection=get_collection("webhooks"),
+        deliveries_collection=get_collection("webhook_deliveries"),
+        sources_collection=get_collection("external_sources"),
+        imports_collection=get_collection("imported_verifications"),
+        exports_collection=get_collection("export_logs"),
+    )
+
+
+HealthServiceDep = Annotated[IntegrationHealthService, Depends(get_health_service)]
+
+
+@router.get("/health", response_model=HealthDashboardResponse)
+async def get_health_dashboard(
+    user: CurrentUser,
+    service: HealthServiceDep,
+) -> HealthDashboardResponse:
+    """Get integration health dashboard.
+
+    Returns health status and metrics for all integration types:
+    - Webhooks: delivery success rates, latency, failures
+    - External Sources: sync success rates, overdue syncs
+    - Exports (CAP, EDXL, GeoJSON): export success rates
+
+    Health statuses:
+    - healthy: All systems operational (>95% success rate)
+    - degraded: Some issues but functional (80-95% success rate)
+    - unhealthy: Critical issues (<80% success rate)
+    - unknown: No data available
+
+    Args:
+        user: Current authenticated user
+        service: Health monitoring service
+
+    Returns:
+        Health dashboard with metrics, alerts, and recommendations
+    """
+    dashboard = await service.get_health_dashboard(user.workspace_id)
+    return HealthDashboardResponse(data=dashboard)
+
+
+@router.get("/health/summary", response_model=HealthSummaryResponse)
+async def get_health_summary(
+    user: CurrentUser,
+    service: HealthServiceDep,
+) -> HealthSummaryResponse:
+    """Get quick health summary.
+
+    Returns a simplified health overview suitable for status pages
+    and quick checks. For detailed metrics, use GET /integrations/health.
+
+    Args:
+        user: Current authenticated user
+        service: Health monitoring service
+
+    Returns:
+        Summary with overall status and per-integration status
+    """
+    summary = await service.get_integration_summary(user.workspace_id)
+    return HealthSummaryResponse(data=summary)
