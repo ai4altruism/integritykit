@@ -4,7 +4,7 @@
 
 **Branch:** `sprint-8/v1.0-features`
 **Started:** 2026-03-10
-**Status:** In Progress (~65% complete)
+**Status:** In Progress (~70% complete)
 
 ### Completed Tasks
 
@@ -16,7 +16,7 @@
 #### Multi-Language Support ✅
 - S8-2: Language detection service (`src/integritykit/services/language_detection.py`)
 - S8-3: Spanish/French LLM prompts (`src/integritykit/llm/prompts/spanish/`, `french/`)
-- S8-4: Multi-language COP draft generation (implementation guide created)
+- S8-4: Multi-language COP draft generation (`src/integritykit/services/draft.py`)
 - S8-5: Block Kit i18n (`src/integritykit/slack/i18n.py`)
 
 #### Analytics Features ✅
@@ -138,8 +138,8 @@ GEOJSON_EXPORT_ENABLED=true
 
 ## Resume Instructions
 
-**Last updated:** 2026-03-11
-**Last commit:** `db4145c feat(sprint8): implement S8-14, S8-15 after-action reports`
+**Last updated:** 2026-03-13
+**Last commit:** `d95346f feat(sprint8): implement S8-4 multi-language COP draft generation`
 
 To continue Sprint 8 development:
 
