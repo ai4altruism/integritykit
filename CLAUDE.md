@@ -33,6 +33,7 @@
 - S8-19: EDXL-DE export (`src/integritykit/services/edxl_export.py`)
 - S8-20: Inbound verification sources (`src/integritykit/services/external_sources.py`)
 - S8-21: GeoJSON export (`src/integritykit/services/geojson_export.py`)
+- S8-23: Integration tests (`tests/integration/test_integrations.py`)
 
 ### Remaining Tasks
 
@@ -41,7 +42,6 @@
 
 #### Integrations
 - S8-22: Integration health monitoring dashboard
-- S8-23: Integration tests
 
 #### Enhancements
 - S8-24: Mobile-optimized App Home layout
@@ -139,7 +139,7 @@ GEOJSON_EXPORT_ENABLED=true
 ## Resume Instructions
 
 **Last updated:** 2026-03-13
-**Last commit:** `d95346f feat(sprint8): implement S8-4 multi-language COP draft generation`
+**Last commit:** `037215d feat(sprint8): implement S8-23 integration tests for v1.0 features`
 
 To continue Sprint 8 development:
 
