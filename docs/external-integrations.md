@@ -1,8 +1,24 @@
-# External Integrations Guide - v1.0
+# External Integrations Guide
 
 **Version:** 1.0
 **Sprint:** Sprint 8
 **Last Updated:** 2026-03-13
+
+This document consolidates all external integration documentation for the Aid Arena Integrity Kit v1.0.
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Architecture](#architecture-overview)
+3. [Webhooks](#webhooks)
+4. [Exports (CAP, EDXL-DE, GeoJSON)](#exports)
+5. [External Verification Sources](#external-verification-sources)
+6. [Health Monitoring](#health-monitoring)
+7. [Quick Reference](#quick-reference)
+
+---
 
 ## Overview
 
@@ -13,23 +29,80 @@ The Aid Arena Integrity Kit v1.0 integrates with external emergency management s
 - **Inbound verification sources** - Import pre-verified data from authoritative systems
 - **Health monitoring** - Track integration status and performance
 
-This guide provides step-by-step instructions for configuring and using each integration type.
+This enables the Integrity Kit to function as part of a broader emergency management ecosystem.
 
-## Table of Contents
+---
 
-1. [Webhooks](#webhooks)
-2. [CAP 1.2 Export](#cap-12-export)
-3. [EDXL-DE Export](#edxl-de-export)
-4. [GeoJSON Export](#geojson-export)
-5. [External Verification Sources](#external-verification-sources)
-6. [Integration Health Monitoring](#integration-health-monitoring)
-7. [Troubleshooting](#troubleshooting)
+## Architecture Overview
+
+### Integration Components
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Integrity Kit Core                    │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐ │
+│  │   Backlog   │→│  Candidates  │→│  COP Updates  │ │
+│  └─────────────┘  └──────────────┘  └───────────────┘ │
+└───────────────────────────┬────────────────┬────────────┘
+                            │                │
+            ┌───────────────┴────────────────┴──────────┐
+            │       Integration Layer (v1.0)            │
+            │                                            │
+            │  ┌──────────────────────────────────────┐ │
+            │  │  Outbound: Webhooks & Exports        │ │
+            │  │  - Event notification webhooks       │ │
+            │  │  - CAP 1.2 XML export               │ │
+            │  │  - EDXL-DE export                   │ │
+            │  │  - GeoJSON export                   │ │
+            │  └──────────────────────────────────────┘ │
+            │                                            │
+            │  ┌──────────────────────────────────────┐ │
+            │  │  Inbound: Verification Sources       │ │
+            │  │  - Government API integration        │ │
+            │  │  - NGO feed import                   │ │
+            │  │  - Verified reporter systems         │ │
+            │  └──────────────────────────────────────┘ │
+            │                                            │
+            │  ┌──────────────────────────────────────┐ │
+            │  │  Health Monitoring                   │ │
+            │  │  - Webhook delivery tracking         │ │
+            │  │  - Source sync status                │ │
+            │  │  - Error rate monitoring             │ │
+            │  └──────────────────────────────────────┘ │
+            └────────────────────────────────────────────┘
+                            │                │
+                            ↓                ↓
+┌──────────────────┐  ┌─────────────────────────────────┐
+│ External Systems │  │  Emergency Management Systems   │
+│ - Mapping tools  │  │  - Public alerting platforms    │
+│ - Dashboards     │  │  - EOC systems                  │
+│ - Analytics      │  │  - Government APIs              │
+└──────────────────┘  └─────────────────────────────────┘
+```
+
+### Design Principles
+
+1. **Standards-Based:** Use established emergency management protocols (CAP, EDXL-DE)
+2. **Security-First:** Authentication, input validation, rate limiting on all integrations
+3. **Resilient:** Retry logic, failure handling, graceful degradation
+4. **Observable:** Comprehensive logging, health monitoring, delivery tracking
+5. **Provenance-Preserving:** External sources are tracked in audit trail
+6. **Bi-Directional:** Both push (webhooks) and pull (API exports) patterns supported
 
 ---
 
 ## Webhooks
 
 Webhooks enable real-time notifications when events occur in the Integrity Kit.
+
+### Supported Events
+
+| Event Type | Trigger | Payload Includes |
+|------------|---------|------------------|
+| `cop_update.published` | COP update published to Slack | Update ID, version, language, line items, export links |
+| `cop_candidate.verified` | Candidate receives verification | Candidate ID, verification method, confidence level |
+| `cop_candidate.promoted` | Cluster promoted to candidate | Candidate ID, cluster ID, risk tier |
+| `cluster.created` | New cluster formed | Cluster ID, topic type, signal count, priority score |
 
 ### Quick Start
 
@@ -62,6 +135,17 @@ curl -X POST https://api.integritykit.aidarena.org/api/v1/integrations/webhooks/
 
 Your endpoint will receive POST requests with this structure:
 
+**Headers:**
+```
+Content-Type: application/json
+X-Webhook-Event: cop_update.published
+X-Webhook-ID: 507f1f77bcf86cd799439011
+X-Webhook-Delivery-ID: 507f191e810c19729de860ea
+X-Webhook-Signature: sha256=abc123...
+Authorization: Bearer your_secret_token
+```
+
+**Payload:**
 ```json
 {
   "event_id": "evt_abc123",
@@ -72,7 +156,6 @@ Your endpoint will receive POST requests with this structure:
     "update_id": "cop-update-12345",
     "version": 1,
     "language": "en",
-    "published_at": "2026-03-13T14:30:00Z",
     "line_items": [...],
     "export_links": {
       "cap": "https://api.integritykit.aidarena.org/api/v1/exports/cap/cop-update-12345",
@@ -82,19 +165,9 @@ Your endpoint will receive POST requests with this structure:
 }
 ```
 
-### Supported Events
+### Authentication Methods
 
-| Event Type | Trigger | Payload Includes |
-|------------|---------|------------------|
-| `cop_update.published` | COP update published to Slack | Update ID, version, language, line items, export links |
-| `cop_candidate.verified` | Candidate receives verification | Candidate ID, verification method, confidence level |
-| `cop_candidate.promoted` | Cluster promoted to candidate | Candidate ID, cluster ID, risk tier |
-| `cluster.created` | New cluster formed | Cluster ID, topic type, signal count, priority score |
-
-### Authentication Types
-
-#### Bearer Token
-
+**Bearer Token:**
 ```json
 {
   "auth_type": "bearer",
@@ -104,10 +177,7 @@ Your endpoint will receive POST requests with this structure:
 }
 ```
 
-Webhook includes: `Authorization: Bearer your_secret_token`
-
-#### Basic Auth
-
+**Basic Auth:**
 ```json
 {
   "auth_type": "basic",
@@ -118,8 +188,7 @@ Webhook includes: `Authorization: Bearer your_secret_token`
 }
 ```
 
-#### API Key
-
+**API Key:**
 ```json
 {
   "auth_type": "api_key",
@@ -130,8 +199,7 @@ Webhook includes: `Authorization: Bearer your_secret_token`
 }
 ```
 
-#### Custom Header
-
+**Custom Header:**
 ```json
 {
   "auth_type": "custom_header",
@@ -144,10 +212,7 @@ Webhook includes: `Authorization: Bearer your_secret_token`
 
 ### Verifying Webhook Signatures
 
-Each webhook includes an `X-Webhook-Signature` header for authenticity verification.
-
 **Python Example:**
-
 ```python
 import hmac
 import hashlib
@@ -164,7 +229,6 @@ def verify_webhook_signature(payload_body: bytes, signature: str, webhook_id: st
 ```
 
 **Node.js Example:**
-
 ```javascript
 const crypto = require('crypto');
 
@@ -184,10 +248,15 @@ function verifyWebhookSignature(payloadBody, signature, webhookId) {
 }
 ```
 
-### Retry Configuration
+### Retry Behavior
 
-Customize retry behavior per webhook:
+Failed webhook deliveries are automatically retried with exponential backoff:
 
+- **Default max retries:** 3
+- **Default initial delay:** 60 seconds
+- **Default backoff multiplier:** 2.0
+
+**Configure retry behavior:**
 ```json
 {
   "retry_config": {
@@ -198,63 +267,36 @@ Customize retry behavior per webhook:
 }
 ```
 
-Default retry schedule:
-- Attempt 1: Immediate
-- Attempt 2: After 60 seconds
-- Attempt 3: After 120 seconds
-- Attempt 4: After 240 seconds
-
 ### Webhook Management
 
-**List webhooks:**
-```bash
-GET /api/v1/integrations/webhooks
-```
-
-**Get webhook details:**
-```bash
-GET /api/v1/integrations/webhooks/{webhook_id}
-```
-
-**Update webhook:**
-```bash
-PUT /api/v1/integrations/webhooks/{webhook_id}
-```
-
-**Delete webhook:**
-```bash
-DELETE /api/v1/integrations/webhooks/{webhook_id}
-```
-
-**View delivery history:**
-```bash
-GET /api/v1/integrations/webhooks/{webhook_id}/deliveries?status=failed
-```
-
-For complete webhook documentation, see [Webhook System Guide](webhooks-guide.md).
+- `GET /api/v1/integrations/webhooks` - List webhooks
+- `GET /api/v1/integrations/webhooks/{webhook_id}` - Get webhook details
+- `PUT /api/v1/integrations/webhooks/{webhook_id}` - Update webhook
+- `DELETE /api/v1/integrations/webhooks/{webhook_id}` - Delete webhook
+- `GET /api/v1/integrations/webhooks/{webhook_id}/deliveries` - View delivery history
 
 ---
 
-## CAP 1.2 Export
+## Exports
+
+### CAP 1.2 Export
 
 Common Alerting Protocol (CAP) is the international standard for emergency alerts and public warnings.
 
-### Use Cases
-
-- Integration with public alerting systems (Integrated Public Alert and Warning System - IPAWS)
+**Use Cases:**
+- Integration with public alerting systems (IPAWS)
 - Emergency broadcasting to radio/TV
 - Mobile emergency alerts
 - Integration with national warning systems
 
-### Export COP Update as CAP
-
+**Export COP Update as CAP:**
 ```bash
 curl -X GET https://api.integritykit.aidarena.org/api/v1/exports/cap/{update_id} \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Accept: application/xml"
 ```
 
-### CAP Field Mapping
+**CAP Field Mapping:**
 
 | COP Field | CAP Field | Mapping Logic |
 |-----------|-----------|---------------|
@@ -267,8 +309,7 @@ curl -X GET https://api.integritykit.aidarena.org/api/v1/exports/cap/{update_id}
 | Location | `info/area` | Coordinates converted to CAP circle/polygon |
 | When field | `info/effective` | Event timestamp |
 
-### Example CAP Output
-
+**Example CAP Output:**
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
@@ -296,10 +337,9 @@ curl -X GET https://api.integritykit.aidarena.org/api/v1/exports/cap/{update_id}
 </alert>
 ```
 
-### Multi-Language CAP Export
+**Multi-Language CAP Export:**
 
 Multi-language COP updates create separate `<info>` blocks per language:
-
 ```xml
 <alert>
   <identifier>cop-update-67890</identifier>
@@ -308,61 +348,47 @@ Multi-language COP updates create separate `<info>` blocks per language:
   <info>
     <language>en-US</language>
     <headline>Shelter Alpha Closure</headline>
-    ...
   </info>
 
   <!-- Spanish -->
   <info>
     <language>es-ES</language>
     <headline>Cierre del Refugio Alpha</headline>
-    ...
   </info>
 </alert>
 ```
 
-### CAP Export Rules
-
+**CAP Export Rules:**
 1. **Only verified items** can be exported to CAP format
 2. **In-review items** are excluded (CAP requires certainty)
 3. **Location required** - Items without location data are skipped
 4. **Risk tier mapping** - Automatically maps to CAP urgency/severity
 
-### Configuration
-
+**Configuration:**
 ```bash
-# Enable CAP export
 CAP_EXPORT_ENABLED=true
-
-# Set sender identifier
 CAP_SENDER_ID=integritykit@aidarena.org
-
-# Cache exports for performance
 CAP_EXPORT_CACHE_TTL_SECONDS=300
 ```
 
----
-
-## EDXL-DE Export
+### EDXL-DE Export
 
 Emergency Data Exchange Language - Distribution Element (EDXL-DE) provides a standardized envelope for routing emergency messages.
 
-### Use Cases
-
+**Use Cases:**
 - Distribution to multiple emergency management systems
 - Routing messages through emergency operations centers (EOCs)
 - Integration with emergency management information systems (EMIS)
 - Interoperability with government systems
 
-### Export as EDXL-DE
-
+**Export as EDXL-DE:**
 ```bash
 curl -X GET https://api.integritykit.aidarena.org/api/v1/exports/edxl/{update_id} \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Accept: application/xml"
 ```
 
-### EDXL-DE Structure
-
+**EDXL-DE Structure:**
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <EDXLDistribution xmlns="urn:oasis:names:tc:emergency:EDXL:DE:1.0">
@@ -383,36 +409,29 @@ curl -X GET https://api.integritykit.aidarena.org/api/v1/exports/edxl/{update_id
 </EDXLDistribution>
 ```
 
-### Configuration
-
+**Configuration:**
 ```bash
-# Enable EDXL-DE export
 EDXL_DE_EXPORT_ENABLED=true
 ```
 
----
-
-## GeoJSON Export
+### GeoJSON Export
 
 GeoJSON provides location data for mapping platforms.
 
-### Use Cases
-
+**Use Cases:**
 - Display COP updates on web maps (Leaflet, Mapbox, Google Maps)
 - Import into GIS platforms (ArcGIS, QGIS)
 - Spatial analysis and routing
 - Mobile mapping applications
 
-### Export as GeoJSON
-
+**Export as GeoJSON:**
 ```bash
 curl -X GET https://api.integritykit.aidarena.org/api/v1/exports/geojson/{update_id} \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Accept: application/json"
 ```
 
-### GeoJSON Structure
-
+**GeoJSON Structure:**
 ```json
 {
   "type": "FeatureCollection",
@@ -432,9 +451,7 @@ curl -X GET https://api.integritykit.aidarena.org/api/v1/exports/geojson/{update
         "so_what": "Redirecting evacuees to Shelter Bravo",
         "readiness_state": "verified",
         "risk_tier": "elevated",
-        "citations": [
-          "https://slack.com/archives/C123/p1234567890"
-        ],
+        "citations": ["https://slack.com/archives/C123/p1234567890"],
         "language": "en"
       }
     }
@@ -442,32 +459,25 @@ curl -X GET https://api.integritykit.aidarena.org/api/v1/exports/geojson/{update
 }
 ```
 
-### Using GeoJSON with Leaflet
-
+**Using GeoJSON with Leaflet:**
 ```javascript
-// Fetch GeoJSON
 const response = await fetch('/api/v1/exports/geojson/cop-update-12345');
 const geojson = await response.json();
 
-// Add to Leaflet map
 L.geoJSON(geojson, {
   onEachFeature: (feature, layer) => {
     const props = feature.properties;
     layer.bindPopup(`
       <h3>${props.what}</h3>
       <p><strong>Where:</strong> ${props.where}</p>
-      <p><strong>When:</strong> ${props.when}</p>
       <p><strong>Status:</strong> ${props.readiness_state}</p>
-      <p><a href="${props.citations[0]}" target="_blank">View Source</a></p>
     `);
   }
 }).addTo(map);
 ```
 
-### Configuration
-
+**Configuration:**
 ```bash
-# Enable GeoJSON export
 GEOJSON_EXPORT_ENABLED=true
 ```
 
@@ -568,25 +578,17 @@ curl -X POST https://api.integritykit.aidarena.org/api/v1/integrations/sources/{
 }
 ```
 
-### Configuration
-
+**Configuration:**
 ```bash
-# Enable external sources
 EXTERNAL_SOURCES_ENABLED=true
-
-# Rate limiting
 MAX_IMPORTS_PER_SOURCE_PER_HOUR=100
-
-# Batch processing
 IMPORT_BATCH_SIZE=50
-
-# Duplicate detection
 IMPORT_DUPLICATE_CHECK_ENABLED=true
 ```
 
 ---
 
-## Integration Health Monitoring
+## Health Monitoring
 
 Monitor the health and performance of all integrations from a single dashboard.
 
@@ -597,8 +599,7 @@ curl -X GET https://api.integritykit.aidarena.org/api/v1/integrations/health \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-### Response Structure
-
+**Response:**
 ```json
 {
   "data": {
@@ -640,16 +641,13 @@ curl -X GET https://api.integritykit.aidarena.org/api/v1/integrations/health \
 ### Alerting
 
 Integration health alerts trigger when:
-
 - Webhook success rate drops below 90% (warning) or 80% (critical)
 - External source sync fails 3 consecutive times
 - Export generation fails 5 times in 1 hour
 - Any integration unavailable for > 15 minutes
 
-### Configuration
-
+**Configuration:**
 ```bash
-# Health monitoring
 INTEGRATION_HEALTH_CHECK_INTERVAL_SECONDS=60
 WEBHOOK_SUCCESS_RATE_THRESHOLD_WARNING=0.90
 WEBHOOK_SUCCESS_RATE_THRESHOLD_CRITICAL=0.80
@@ -657,148 +655,123 @@ WEBHOOK_SUCCESS_RATE_THRESHOLD_CRITICAL=0.80
 
 ---
 
-## Troubleshooting
+## Quick Reference
 
-### Webhook Deliveries Failing
+### Webhook Management
 
-**Symptoms:**
-- Webhooks not received by external system
-- High failure rate in delivery history
+**List webhooks:**
+```bash
+GET /api/v1/integrations/webhooks
+```
 
-**Solutions:**
+**Create webhook:**
+```bash
+POST /api/v1/integrations/webhooks
+```
 
-1. **Check webhook status:**
-   ```bash
-   curl https://api.integritykit.aidarena.org/api/v1/integrations/webhooks/{webhook_id}
-   ```
-   Verify `enabled: true`
+**Update webhook:**
+```bash
+PUT /api/v1/integrations/webhooks/{webhook_id}
+```
 
-2. **Test webhook delivery:**
-   ```bash
-   curl -X POST https://api.integritykit.aidarena.org/api/v1/integrations/webhooks/{webhook_id}/test
-   ```
+**Test webhook:**
+```bash
+POST /api/v1/integrations/webhooks/{webhook_id}/test
+```
 
-3. **Review delivery history:**
-   ```bash
-   curl "https://api.integritykit.aidarena.org/api/v1/integrations/webhooks/{webhook_id}/deliveries?status=failed"
-   ```
+**View delivery history:**
+```bash
+GET /api/v1/integrations/webhooks/{webhook_id}/deliveries?status=failed
+```
 
-4. **Common issues:**
-   - **Timeout:** Endpoint taking >10 seconds to respond
-   - **Authentication:** Invalid credentials in `auth_config`
-   - **URL issues:** Incorrect URL or firewall blocking requests
-   - **Certificate errors:** SSL/TLS certificate problems
+### Data Export
 
-5. **Verify endpoint is reachable:**
-   ```bash
-   curl -X POST https://your-webhook-url.com/path \
-     -H "Content-Type: application/json" \
-     -d '{"test": true}'
-   ```
+**Export as CAP 1.2 XML:**
+```bash
+GET /api/v1/exports/cap/{update_id}
+```
 
-### CAP Export Validation Errors
+**Export as GeoJSON:**
+```bash
+GET /api/v1/exports/geojson/{update_id}
+```
 
-**Symptoms:**
-- CAP export returns 422 error
-- CAP XML fails validation
+**Export as EDXL-DE:**
+```bash
+GET /api/v1/exports/edxl/{update_id}
+```
 
-**Solutions:**
+### External Sources
 
-1. **Check required fields:**
-   - Verified status required (in-review items excluded)
-   - Location data required for area element
-   - What, when, where fields must be complete
+**List external sources:**
+```bash
+GET /api/v1/integrations/sources?source_type=government_api&enabled=true
+```
 
-2. **Validate CAP XML:**
-   Use online CAP validator: http://www.cap-validator.org/
+**Register external source:**
+```bash
+POST /api/v1/integrations/sources
+```
 
-3. **Review error details:**
-   ```json
-   {
-     "error": "CAP_EXPORT_VALIDATION_ERROR",
-     "details": [
-       {
-         "field": "location",
-         "message": "Location required for CAP export"
-       }
-     ]
-   }
-   ```
+**Trigger import:**
+```bash
+POST /api/v1/integrations/sources/{source_id}/import
+```
 
-### External Source Import Issues
+### Health Monitoring
 
-**Symptoms:**
-- No candidates created from import
-- Import job stuck in "in_progress" status
+**Get integration health:**
+```bash
+GET /api/v1/integrations/health
+```
 
-**Solutions:**
+### Configuration
 
-1. **Check source configuration:**
-   ```bash
-   curl https://api.integritykit.aidarena.org/api/v1/integrations/sources/{source_id}
-   ```
+**Environment Variables:**
+```bash
+# Webhooks
+WEBHOOKS_ENABLED=true
+WEBHOOK_TIMEOUT_SECONDS=10
+WEBHOOK_MAX_RETRIES=3
 
-2. **Verify external API is accessible:**
-   ```bash
-   curl -H "Authorization: Bearer API_KEY" https://external-api.example.com/endpoint
-   ```
+# Exports
+CAP_EXPORT_ENABLED=true
+CAP_SENDER_ID=integritykit@example.org
+GEOJSON_EXPORT_ENABLED=true
 
-3. **Review import job logs:**
-   Check application logs for import errors
+# External Sources
+EXTERNAL_SOURCES_ENABLED=true
+MAX_IMPORTS_PER_SOURCE_PER_HOUR=100
+```
 
-4. **Common issues:**
-   - **API unavailable:** External source API down or rate-limited
-   - **Authentication failed:** Invalid credentials
-   - **Schema mismatch:** External data doesn't match expected format
-   - **All duplicates:** All imported items already exist
+### Rate Limits
 
-### GeoJSON Not Displaying on Map
+| Endpoint | Limit | Window |
+|----------|-------|--------|
+| Webhook deliveries | 1000 / destination | 1 hour |
+| Exports | 100 / user | 1 hour |
+| Imports | 100 / source | 1 hour |
+| Health checks | 60 / user | 1 minute |
 
-**Symptoms:**
-- GeoJSON export successful but features don't appear on map
+### Webhook Event Types
 
-**Solutions:**
+| Event | Description |
+|-------|-------------|
+| `cop_update.published` | COP update published |
+| `cop_candidate.verified` | Candidate verified |
+| `cop_candidate.promoted` | Cluster promoted to candidate |
+| `cluster.created` | New cluster formed |
 
-1. **Verify GeoJSON structure:**
-   ```bash
-   curl https://api.integritykit.aidarena.org/api/v1/exports/geojson/{update_id} | jq
-   ```
+### CAP Field Mapping
 
-2. **Check coordinate order:**
-   GeoJSON uses [longitude, latitude] (not lat, lon)
-
-3. **Verify CRS compatibility:**
-   GeoJSON uses WGS84 (EPSG:4326) by default
-
-4. **Test with online viewer:**
-   Use http://geojson.io to validate GeoJSON
-
-### Integration Health Shows "Unhealthy"
-
-**Symptoms:**
-- Integration health endpoint returns "unhealthy" status
-
-**Solutions:**
-
-1. **Review specific integration metrics:**
-   - Check webhook success rate
-   - Check external source sync status
-   - Check export error rate
-
-2. **Investigate recent failures:**
-   - Review webhook delivery history
-   - Check external source import logs
-   - Review export error logs
-
-3. **Check system resources:**
-   - Verify database connectivity
-   - Check API rate limits
-   - Monitor system load
-
-4. **Restart integrations if needed:**
-   - Disable and re-enable problematic integrations
-   - Clear cached credentials
-   - Retry failed operations
+| COP Field | CAP Field |
+|-----------|-----------|
+| Update ID | `alert/identifier` |
+| Published timestamp | `alert/sent` |
+| What field | `info/headline` + `info/description` |
+| Location | `info/area` |
+| Risk tier | `info/urgency` (high_stakes→Immediate) |
+| Verification | `info/certainty` (verified→Observed) |
 
 ---
 
@@ -840,14 +813,18 @@ WEBHOOK_SUCCESS_RATE_THRESHOLD_CRITICAL=0.80
 
 ## See Also
 
-- [Webhook System Guide](webhooks-guide.md) - Complete webhook documentation
-- [Integration Architecture](integration-architecture-v1.0.md) - Technical architecture details
+- [Analytics Guide](analytics.md) - Analytics and reporting
+- [Multi-Language Guide](multi-language.md) - Multi-language support
 - [API Guide](api_guide.md) - Full API reference
-- [Analytics Guide](analytics-guide.md) - Analytics and reporting
-- [Multi-Language Guide](multi-language-guide.md) - Multi-language support
 
 ---
 
 **Version:** 1.0
 **Last Updated:** 2026-03-13
 **Sprint:** 8
+
+**Sources Consolidated:**
+- `external-integrations-guide.md`
+- `integration-architecture-v1.0.md`
+- `webhooks-guide.md`
+- `integration-quick-reference.md`

@@ -1,5 +1,9 @@
 # Aid Arena Integrity Kit
 
+![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Python](https://img.shields.io/badge/python-3.11+-green)
+![License](https://img.shields.io/badge/license-MIT-brightgreen)
+
 An open-source coordination layer for crisis response that turns chaotic messages into provenance-backed updates, enabling collective verification, safer organizing, and faster, fairer decisions.
 
 ## Overview
@@ -127,7 +131,7 @@ Unlike traditional emergency management tools that require participants to file 
 Clone the repository:
 
 ```bash
-git clone https://github.com/aidarena/integritykit.git
+git clone https://github.com/ai4altruism/integritykit.git
 cd integritykit
 ```
 
@@ -200,180 +204,22 @@ Run the application:
 uvicorn integritykit.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
-The API will be available at http://localhost:8080
+The application will be available at:
 
-## Facilitator Quick-Start Guide
+- **API**: http://localhost:8080
+- **API Docs**: http://localhost:8080/docs
+- **Metrics Dashboard**: http://localhost:8080/dashboard
+- **Analytics Dashboard**: http://localhost:8080/analytics
 
-This guide covers the end-to-end workflow for facilitators publishing COP updates.
+## Facilitator Quick-Start
 
-### Overview
+See the [Facilitator Guide](docs/facilitator-guide.md) for the complete workflow including:
 
-As a facilitator, you coordinate the transformation of Slack conversations into verified situational awareness updates. The system helps you:
-
-1. Monitor the prioritized backlog of clustered signals
-2. Promote important clusters to COP candidates
-3. Review and verify candidate information
-4. Generate draft COP updates with proper wording
-5. Approve and publish updates to Slack
-
-### Publish Workflow
-
-The publish workflow ensures human approval at every step:
-
-```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   CREATE    │───▶│    EDIT     │───▶│   APPROVE   │───▶│   PUBLISH   │
-│    DRAFT    │    │  (optional) │    │  (required) │    │  to Slack   │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-```
-
-#### Step 1: Create Draft
-
-Select one or more verified COP candidates and generate a draft:
-
-```http
-POST /api/v1/publish/drafts
-{
-  "candidate_ids": ["candidate-id-1", "candidate-id-2"],
-  "title": "Crisis Update #5"
-}
-```
-
-The system generates line items with:
-- **VERIFIED** status for confirmed information (direct factual wording)
-- **IN REVIEW** status for unconfirmed reports (hedged wording: "Unconfirmed reports indicate...")
-
-#### Step 2: Edit Line Items (Optional)
-
-Review the auto-generated text and edit if needed:
-
-```http
-PATCH /api/v1/publish/drafts/{update_id}/line-items
-{
-  "item_index": 0,
-  "new_text": "Corrected text here"
-}
-```
-
-All edits are logged with before/after snapshots for audit purposes.
-
-#### Step 3: Preview
-
-View how the update will appear in Slack:
-
-```http
-GET /api/v1/publish/drafts/{update_id}/preview
-```
-
-Returns both markdown and Slack Block Kit format.
-
-#### Step 4: Approve (Required)
-
-No update can be published without explicit human approval:
-
-```http
-POST /api/v1/publish/drafts/{update_id}/approve
-{
-  "notes": "Reviewed and verified all items"
-}
-```
-
-This is the critical safety gate - the system will not post anything to Slack without this step.
-
-#### Step 5: Publish
-
-After approval, publish to your designated Slack channel:
-
-```http
-POST /api/v1/publish/drafts/{update_id}/publish
-{
-  "channel_id": "C123456789"
-}
-```
-
-The update is posted with:
-- Formatted Block Kit sections for Verified/In Review/Rumor Control
-- Clickable citation links to source messages
-- IntegrityKit attribution and facilitator review notice
-
-### Clarification Templates
-
-When you need additional information from reporters, use pre-built templates:
-
-```http
-POST /api/v1/publish/clarification-template
-{
-  "template_type": "location",
-  "topic": "shelter opening"
-}
-```
-
-Available template types:
-| Type | Purpose |
-|------|---------|
-| `location` | Request specific address or landmark details |
-| `time` | Clarify when something occurred or is expected |
-| `source` | Ask for verification source or eyewitness status |
-| `status` | Request current status update |
-| `impact` | Understand who/what is affected |
-| `general` | General follow-up request |
-
-### Audit Trail
-
-Every action is logged for transparency and accountability:
-
-```http
-GET /api/v1/audit/logs?target_type=cop_update&target_id={update_id}
-```
-
-The audit log captures:
-- Who performed each action (actor ID and role)
-- What changed (before/after state)
-- When it happened (immutable timestamp)
-- Why (justification notes for approvals)
-
-### Common Workflows
-
-#### Publishing a Single Verified Item
-
-1. Navigate to COP Candidates list
-2. Select a VERIFIED candidate
-3. Create draft → Preview → Approve → Publish
-
-#### Handling Conflicting Information
-
-1. Identify candidates with conflicts (🔴 indicator)
-2. Use clarification templates to gather more info
-3. Resolve conflict in the candidate workflow
-4. Only then include in a COP draft
-
-#### Creating a Mixed Update
-
-1. Select multiple candidates (some verified, some in-review)
-2. System automatically sections them appropriately
-3. Verified items get direct wording
-4. In-review items get hedged wording ("Unconfirmed reports...")
-5. Open questions appear in a separate section
-
-### Running Tests
-
-Run the full test suite:
-
-```bash
-pytest
-```
-
-Run with coverage:
-
-```bash
-pytest --cov=integritykit --cov-report=html
-```
-
-Run only unit tests (fast):
-
-```bash
-pytest -m unit
-```
+- Backlog monitoring and cluster promotion
+- COP candidate verification workflow
+- Draft generation with verification-aware wording
+- Human approval gates and Slack publishing
+- Clarification templates and audit trails
 
 ## Configuration
 
@@ -433,14 +279,19 @@ integritykit/
 ├── tests/
 │   ├── unit/                       # Fast, isolated tests
 │   ├── integration/                # Database and API tests
+│   ├── e2e/                        # End-to-end tests
+│   ├── performance/                # Performance benchmarks
 │   └── fixtures/                   # Test data and factories
 ├── docs/
-│   ├── Aid_Arena_Integrity_Kit_CDD_Ambient_v0_4.md
-│   ├── Aid_Arena_Integrity_Kit_SRS_Ambient_v0_4.md
-│   ├── mongodb_schema.md
-│   ├── openapi.yaml
-│   ├── prompts.md
-│   └── architecture.md
+│   ├── cdd.md                       # Capability Description Document
+│   ├── srs.md                       # System Requirements Specification
+│   ├── architecture.md              # System architecture
+│   ├── mongodb-schema.md            # Database schema
+│   ├── api-guide.md                 # API reference
+│   ├── analytics.md                 # Analytics guide
+│   ├── multi-language.md            # Multi-language support
+│   ├── external-integrations.md     # Webhooks, exports, sources
+│   └── openapi.yaml                 # OpenAPI specification
 ├── Dockerfile
 ├── pyproject.toml
 └── README.md
@@ -465,6 +316,29 @@ mypy src
 
 # All checks (run this before committing)
 pre-commit run --all-files
+```
+
+### Running Tests
+
+Run the full test suite:
+
+```bash
+pytest
+```
+
+Run with coverage:
+
+```bash
+pytest --cov=integritykit --cov-report=html
+```
+
+Run specific test categories:
+
+```bash
+pytest tests/unit/           # Fast unit tests
+pytest tests/integration/    # Database and API tests
+pytest tests/e2e/           # End-to-end tests
+pytest tests/performance/   # Performance benchmarks
 ```
 
 ### Adding New LLM Prompts
@@ -587,23 +461,25 @@ For production deployments:
 
 ### Core Documentation
 
-- [Capability Description Document (CDD)](docs/Aid_Arena_Integrity_Kit_CDD_Ambient_v0_4.md) - Product requirements and operating concept
-- [System Requirements Specification (SRS)](docs/Aid_Arena_Integrity_Kit_SRS_Ambient_v0_4.md) - Functional and non-functional requirements
+- [Capability Description Document (CDD)](docs/cdd.md) - Product requirements and operating concept
+- [System Requirements Specification (SRS)](docs/srs.md) - Functional and non-functional requirements
 - [Architecture Documentation](docs/architecture.md) - Detailed system architecture and design
-- [MongoDB Schema](docs/mongodb_schema.md) - Database design and schema documentation
+- [MongoDB Schema](docs/mongodb-schema.md) - Database design and schema documentation
 - [API Reference](docs/openapi.yaml) - OpenAPI 3.1 specification
 - [LLM Prompt Design](docs/prompts.md) - Prompt engineering guide and templates
 
-### v1.0 Feature Guides
+### Feature Guides
 
-- [API Guide](docs/api_guide.md) - Complete API reference with examples
-- [Multi-Language Support](docs/multi-language-guide.md) - Configure and use Spanish/French COP drafts
-- [External Integrations](docs/external-integrations-guide.md) - Webhooks, CAP, EDXL-DE, GeoJSON exports
-- [Webhook System](docs/webhooks-guide.md) - Real-time event notification setup
-- [Advanced Analytics](docs/analytics-guide.md) - Metrics, reporting, and after-action analysis
-- [Analytics API Examples](docs/analytics_api_examples.md) - Code examples for analytics queries
-- [Integration Architecture](docs/integration-architecture-v1.0.md) - Technical integration design
-- [Migration Guide](docs/migration-v1.0.md) - Upgrading from v0.4.0 to v1.0
+- [API Guide](docs/api-guide.md) - Complete API reference with examples
+- [Multi-Language Support](docs/multi-language.md) - Configure and use Spanish/French COP drafts
+- [External Integrations](docs/external-integrations.md) - Webhooks, CAP, EDXL-DE, GeoJSON exports
+- [Analytics](docs/analytics.md) - Time-series metrics, trends, and after-action reporting
+
+### Operations
+
+- [Deployment Runbook](docs/deployment-runbook.md) - Production deployment guide
+- [Migration Guide](docs/migration.md) - Upgrading from v0.4.0 to v1.0
+- [Security Review](docs/security-review.md) - Security audit and recommendations
 
 ## Contributing
 
@@ -639,66 +515,28 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Support and Contact
 
-- GitHub Issues: https://github.com/aidarena/integritykit/issues
-- Email: team@aidarena.org
-- Documentation: https://github.com/aidarena/integritykit#readme
+- GitHub Issues: https://github.com/ai4altruism/integritykit/issues
+- Documentation: https://github.com/ai4altruism/integritykit#readme
 
 ## Acknowledgments
 
-The Aid Arena Integrity Kit builds on the foundation of the Chat-Diver application and is informed by real-world crisis coordination needs identified by the Aid Arena community.
-
-This project is funded by [funding source] and developed in partnership with crisis response organizations committed to improving information fidelity during emergencies.
+The Aid Arena Integrity Kit builds on the foundation of the Chat-Diver application and is informed by real-world crisis coordination needs identified by the Aid Arena community, developed in partnership with crisis response organizations committed to improving information fidelity during emergencies.
 
 ## Roadmap
 
-### MVP (Complete)
-- ✅ Signal ingestion and clustering
-- ✅ Backlog management and promotion workflow
-- ✅ Readiness evaluation and conflict detection
-- ✅ COP draft generation with verification-aware wording
-- ✅ **COP publish workflow with human approval gates** (Sprint 4)
-- ✅ **Slack Block Kit formatted output** (Sprint 4)
-- ✅ **Full audit logging for publish actions** (Sprint 4)
-- ✅ RBAC and role-based permissions
-- ✅ Facilitator search
+See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
 
-### Pilot (Complete)
-- ✅ Risk tier classification and publish gates
-- ✅ Duplicate merge workflow
-- ✅ Delta summaries between COP versions
-- ✅ Clarification request integration with Slack
-- ✅ Metrics dashboard with visualizations
-- ✅ Exportable metrics for post-exercise evaluation
+### Current: v1.0.0
 
-### v0.4.0 - Hardening & Release (Complete)
-- ✅ **Two-person rule for high-stakes overrides** - Requires second approver for critical operations
-- ✅ **COP update versioning** - Full version history with diff tracking
-- ✅ **Anti-abuse detection** - Alerts for rapid-fire override patterns
-- ✅ **User suspension system** - Admin can suspend facilitator permissions
-- ✅ **Data retention TTL** - Configurable retention with automatic purge
-- ✅ **Security hardening** - CORS, rate limiting, security headers, ReDoS protection
-- ✅ **Docker Compose** - Complete local development stack
+- Multi-language COP drafts (English, Spanish, French)
+- External integrations (webhooks, CAP 1.2, EDXL-DE, GeoJSON)
+- Advanced analytics and after-action reporting
+- Integration health monitoring
 
-### v1.0 (Current Release - 2026-03-13)
-- **Multi-language COP drafts** - Spanish and French support with localized status labels and wording
-- **External integrations**
-  - Outbound webhooks for real-time event notifications
-  - CAP 1.2 XML export for public alerting systems
-  - EDXL-DE export for emergency management interoperability
-  - GeoJSON export for mapping platforms
-  - Inbound verification sources from authoritative APIs
-  - Integration health monitoring dashboard
-- **Advanced analytics**
-  - Signal volume time-series with channel breakdown
-  - Readiness state transition tracking
-  - Facilitator workload and action velocity metrics
-  - Topic trend detection (emerging/declining/stable)
-  - Conflict resolution time analysis
-  - After-action report export for post-incident review
+### Planned: v1.1
 
-### v1.1 (Planned)
 - Enhanced GIS integration
-- Additional emergency management protocols (EDXL-SitRep, EDXL-HAVE)
+- Additional EDXL protocols (SitRep, HAVE)
 - Mobile-optimized interface
 
 ## Changelog
