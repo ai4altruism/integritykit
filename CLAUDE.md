@@ -4,7 +4,7 @@
 
 **Branch:** `sprint-8/v1.0-features`
 **Started:** 2026-03-10
-**Status:** In Progress (~70% complete)
+**Status:** In Progress (~85% complete)
 
 ### Completed Tasks
 
@@ -36,6 +36,15 @@
 - S8-22: Integration health monitoring (`src/integritykit/services/integration_health.py`)
 - S8-23: Integration tests (`tests/integration/test_integrations.py`)
 
+#### Documentation ✅
+- S8-30: API documentation (`docs/api_guide.md`)
+- S8-31: Multi-language guide (`docs/multi-language-guide.md`)
+- S8-32: External integrations guide (`docs/external-integrations-guide.md`)
+- S8-33: Analytics user guide (`docs/analytics-guide.md`)
+- S8-34: README v1.0 update
+- S8-35: Migration guide (`docs/migration-v1.0.md`)
+- S8-36: CHANGELOG v1.0
+
 ### Remaining Tasks
 
 #### Analytics (High Priority)
@@ -48,15 +57,6 @@
 - S8-27: Interactive facilitator onboarding
 - S8-28: Sandbox training mode
 - S8-29: Enhancement tests
-
-#### Documentation & Release
-- S8-30: Update API documentation
-- S8-31: Multi-language configuration guide
-- S8-32: External integrations guide
-- S8-33: Advanced analytics user guide
-- S8-34: Update README for v1.0
-- S8-35: v1.0 migration guide
-- S8-36: Finalize CHANGELOG
 
 #### Testing & Release
 - S8-37: E2E tests for multi-language

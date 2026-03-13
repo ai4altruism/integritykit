@@ -7,12 +7,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Comprehensive documentation updates for v0.4.0 features
-  - Updated API guide with Sprint 7 endpoints
-  - Expanded architecture documentation
-  - Enhanced MongoDB schema documentation
-  - Extended OpenAPI specification
+### Planned for v1.1
+- Enhanced GIS integration and spatial analysis
+- Additional emergency management protocols (EDXL-SitRep, EDXL-HAVE)
+- Mobile-optimized App Home interface
+- GraphQL API support
+- Advanced AI features for automated verification
+
+## [1.0.0] - 2026-03-13
+
+### Multi-Language Support
+- **Spanish and French COP drafts** (S8-2, S8-3, S8-4, S8-5)
+  - Language detection service with confidence thresholds
+  - Localized LLM prompts for Spanish and French
+  - Multi-language COP draft generation with appropriate wording styles
+  - Internationalized Slack Block Kit templates with translated status labels
+  - Status label translations: VERIFICADO/VÉRIFIÉ, EN REVISIÓN/EN RÉVISION, BLOQUEADO/BLOQUÉ
+  - Section header translations for verified updates, in-review reports, open questions
+
+### External Integrations
+- **Outbound webhooks** (S8-17)
+  - Real-time event notifications for cop_update.published, cop_candidate.verified, cop_candidate.promoted, cluster.created
+  - Multiple authentication methods: Bearer token, Basic auth, API key, Custom header
+  - Automatic retry with exponential backoff (configurable)
+  - HMAC payload signing for verification
+  - Delivery tracking and webhook health monitoring
+  - Test endpoint for webhook validation
+- **CAP 1.2 XML export** (S8-18)
+  - Common Alerting Protocol export for public alerting systems
+  - Field mapping: verification status → certainty, risk tier → urgency/severity
+  - Multi-language CAP support with separate <info> blocks
+  - Location data converted to CAP circle/polygon format
+- **EDXL-DE 2.0 export** (S8-19)
+  - Emergency Data Exchange Language distribution envelope
+  - Standardized message routing for emergency management systems
+- **GeoJSON export** (S8-21)
+  - Location data export for mapping platforms (Leaflet, Mapbox, Google Maps)
+  - Feature properties include what/where/when/who/so_what fields
+  - Citation links and verification status in properties
+- **External verification sources** (S8-20)
+  - Inbound API integration with government/NGO/verified reporter sources
+  - Trust level configuration (high/medium/low) affecting auto-promotion behavior
+  - Duplicate detection to prevent redundant candidate creation
+  - Provenance tracking in audit trail
+  - Multiple authentication types: API key, Bearer token, OAuth 2.0
+
+### Advanced Analytics
+- **Time-series analytics API** (S8-9, S8-10, S8-11, S8-12)
+  - Signal volume time-series with channel breakdown
+  - Readiness state transition tracking (IN_REVIEW→VERIFIED, VERIFIED→BLOCKED, etc.)
+  - Facilitator action metrics with action velocity (actions per hour)
+  - Topic trend detection: emerging, declining, and stable topics
+  - Conflict resolution time analysis
+  - Granularity options: hour, day, week
+  - Multi-metric queries for efficient dashboard updates
+- **After-action report export** (S8-14, S8-15)
+  - Comprehensive post-incident reports with executive summary
+  - Signal processing metrics, COP production stats, facilitator performance
+  - Conflict management analysis, timeline breakdown
+  - JSON and Markdown export formats
+  - Configurable time ranges for exercise or incident periods
+
+### Integration Health Monitoring
+- **Health monitoring dashboard** (S8-22)
+  - Overall integration status: healthy, degraded, unhealthy
+  - Webhook metrics: success rate, failed deliveries, avg response time
+  - External source metrics: sync status, items imported, sync errors
+  - Export metrics: CAP/GeoJSON/EDXL counts, export failures, avg export time
+  - Alerting for webhook success rate drops, source sync failures, export errors
+- **Integration tests** (S8-23)
+  - Unit tests for webhooks, CAP export, EDXL-DE export, GeoJSON export
+  - External source import testing with mock APIs
+  - Analytics service tests for time-series calculations
+  - After-action report generation tests
+
+### Documentation
+- **Updated API documentation** (S8-30)
+  - Added Sprint 8 endpoints for analytics, integrations, exports
+  - Multi-language draft creation examples
+  - Webhook management API reference
+  - Integration health monitoring endpoints
+- **Multi-language configuration guide** (S8-31)
+  - Supported languages and translation tables
+  - Environment variable configuration
+  - LLM prompt localization guide
+  - Slack Block Kit internationalization
+- **External integrations guide** (S8-32)
+  - Webhook setup and authentication
+  - CAP 1.2 export field mapping
+  - EDXL-DE and GeoJSON export usage
+  - External source configuration and trust levels
+  - Integration health monitoring
+- **Advanced analytics user guide** (S8-33)
+  - Available metrics and time-series queries
+  - Topic trend detection examples
+  - Facilitator workload analytics
+  - Conflict resolution analysis
+  - After-action report generation
+  - Dashboard integration examples
+- **Updated README for v1.0** (S8-34)
+  - Added v1.0 features to overview
+  - Updated feature list with multi-language, integrations, analytics
+  - Added new documentation links
+  - Updated environment variable table
+- **v1.0 migration guide** (S8-35)
+  - Step-by-step upgrade instructions from v0.4.0
+  - New environment variables and configuration
+  - Database migration scripts
+  - Rollback procedures
+  - Troubleshooting common migration issues
+- **Finalized CHANGELOG** (S8-36)
+  - Complete v1.0 release notes with all Sprint 8 features
+
+### Technical Improvements
+- New MongoDB collections: webhooks, webhook_deliveries, external_sources, import_jobs
+- Optimized indexes for analytics queries (audit_log, signals, cop_candidates)
+- Webhook delivery job queue with retry logic
+- Language detection with confidence scoring
+- Multi-language prompt registry with fallback to English
+- Export caching for improved performance
 
 ## [0.4.0] - 2026-02-15
 
@@ -109,7 +222,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - pytest infrastructure with fixtures and factories
 - Architecture documentation and README
 
-[Unreleased]: https://github.com/aidarena/integritykit/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/aidarena/integritykit/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/aidarena/integritykit/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/aidarena/integritykit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aidarena/integritykit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/aidarena/integritykit/compare/v0.1.0...v0.2.0
@@ -186,9 +300,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker Compose for local development (MongoDB, ChromaDB, Mongo Express)
 - E2E test suite for hardening workflows
 
-## [Unreleased]
-
-### Planned
-- Multi-language support (Spanish, French)
-- Advanced analytics and reporting
-- External system integrations

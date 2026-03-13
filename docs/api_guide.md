@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| **Version** | 1.1 |
-| **Date** | 2026-02-18 |
+| **Version** | 1.2 |
+| **Date** | 2026-03-13 |
 | **API Base URL** | `https://api.integritykit.aidarena.org/api/v1` |
 
 ---
@@ -34,6 +34,9 @@ The Aid Arena Integrity Kit API provides programmatic access to the Common Opera
 - Two-person approval for high-stakes operations (v0.4.0)
 - User suspension and reinstatement (v0.4.0)
 - Rate limiting and security headers (v0.4.0)
+- Multi-language COP drafts (Spanish, French) (v1.0)
+- External integrations (webhooks, CAP, EDXL-DE, GeoJSON) (v1.0)
+- Advanced analytics and reporting (v1.0)
 
 **Base URL:** `https://api.integritykit.aidarena.org/api/v1`
 
@@ -131,6 +134,12 @@ The API enforces role-based access control (RBAC). Every user has one or more ro
 | `POST /users/{id}/reinstate` | workspace_admin |
 | `POST /approvals/request` | facilitator, workspace_admin |
 | `POST /approvals/{id}/approve` | facilitator, workspace_admin |
+| `GET /analytics/*` | facilitator, workspace_admin |
+| `GET /integrations/health` | facilitator, workspace_admin |
+| `POST /integrations/webhooks` | workspace_admin |
+| `POST /integrations/sources` | workspace_admin |
+| `GET /exports/cap/{update_id}` | facilitator, workspace_admin |
+| `GET /exports/geojson/{update_id}` | facilitator, workspace_admin |
 
 ### Access Denied Response
 
@@ -865,12 +874,215 @@ await assignRole(userId, 'facilitator', {
 
 ---
 
+## v1.0 Features
+
+### Multi-Language Support
+
+All draft generation endpoints now support a `language` parameter for Spanish and French translations.
+
+**Create draft with language:**
+```bash
+POST /api/v1/publish/drafts
+
+{
+  "candidate_ids": ["candidate-id-1"],
+  "title": "Actualización de Crisis #5",
+  "language": "es"
+}
+```
+
+**Supported languages:**
+- `en` - English (default)
+- `es` - Spanish
+- `fr` - French
+
+The language parameter affects:
+- Status labels (VERIFICADO, VÉRIFIÉ, etc.)
+- Section headers
+- Wording style (direct vs. hedged phrasing)
+
+### Analytics Endpoints (v1.0)
+
+**Signal Volume Time-Series:**
+```bash
+GET /api/v1/analytics/signal-volume?workspace_id=W123&granularity=day
+```
+
+**Readiness State Transitions:**
+```bash
+GET /api/v1/analytics/readiness-transitions?workspace_id=W123&granularity=day
+```
+
+**Facilitator Actions:**
+```bash
+GET /api/v1/analytics/facilitator-actions?workspace_id=W123&facilitator_id=U456
+```
+
+**Multi-Metric Time-Series:**
+```bash
+GET /api/v1/analytics/time-series?workspace_id=W123&metrics=signal_volume&metrics=facilitator_actions
+```
+
+Query parameters:
+- `workspace_id` (required): Slack workspace ID
+- `start_date` (optional): ISO 8601 timestamp (default: 7 days ago)
+- `end_date` (optional): ISO 8601 timestamp (default: now)
+- `granularity` (optional): `hour`, `day`, or `week` (default: `day`)
+- `facilitator_id` (optional): Filter by specific facilitator
+- `metrics[]` (multi-metric only): Array of metric names
+
+See [analytics API examples](analytics_api_examples.md) for detailed usage.
+
+### Integration Health Monitoring (v1.0)
+
+**Get integration health status:**
+```bash
+GET /api/v1/integrations/health
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "overall_status": "healthy",
+    "webhooks": {
+      "total_active": 5,
+      "success_rate_24h": 0.98,
+      "failed_deliveries_24h": 3,
+      "avg_response_time_ms": 145
+    },
+    "external_sources": {
+      "total_active": 2,
+      "last_sync": "2026-03-13T10:30:00Z",
+      "items_imported_24h": 45,
+      "sync_errors_24h": 0
+    },
+    "exports": {
+      "cap_exports_24h": 12,
+      "geojson_exports_24h": 18,
+      "export_failures_24h": 0
+    }
+  }
+}
+```
+
+### Webhook Management (v1.0)
+
+**Create webhook:**
+```bash
+POST /api/v1/integrations/webhooks
+
+{
+  "name": "Emergency Operations Center",
+  "url": "https://eoc.example.org/webhooks",
+  "events": ["cop_update.published", "cop_candidate.verified"],
+  "auth_type": "bearer",
+  "auth_config": {
+    "token": "secret_token"
+  },
+  "enabled": true
+}
+```
+
+**Supported events:**
+- `cop_update.published`
+- `cop_candidate.verified`
+- `cop_candidate.promoted`
+- `cluster.created`
+
+**Test webhook:**
+```bash
+POST /api/v1/integrations/webhooks/{webhook_id}/test
+```
+
+**Get delivery history:**
+```bash
+GET /api/v1/integrations/webhooks/{webhook_id}/deliveries?status=failed
+```
+
+See [webhook system guide](webhooks-guide.md) for complete documentation.
+
+### External Source Integration (v1.0)
+
+**Register external source:**
+```bash
+POST /api/v1/integrations/sources
+
+{
+  "name": "FEMA Incident API",
+  "source_type": "government_api",
+  "endpoint": "https://api.fema.gov/incidents",
+  "auth_config": {
+    "type": "bearer",
+    "token": "api_key"
+  },
+  "trust_level": "high",
+  "enabled": true
+}
+```
+
+**Trigger import:**
+```bash
+POST /api/v1/integrations/sources/{source_id}/import
+
+{
+  "start_time": "2026-03-13T00:00:00Z",
+  "end_time": "2026-03-13T23:59:59Z",
+  "auto_promote": false
+}
+```
+
+**Source types:**
+- `government_api` - Official government sources (high trust)
+- `ngo_feed` - NGO verified feeds (medium trust)
+- `verified_reporter` - Credentialed reporters (medium trust)
+- `other` - Custom integrations (low trust)
+
+### Export Formats (v1.0)
+
+**CAP 1.2 XML Export:**
+```bash
+GET /api/v1/exports/cap/{update_id}
+Accept: application/xml
+```
+
+**EDXL-DE Export:**
+```bash
+GET /api/v1/exports/edxl/{update_id}
+Accept: application/xml
+```
+
+**GeoJSON Export:**
+```bash
+GET /api/v1/exports/geojson/{update_id}
+Accept: application/json
+```
+
+**After-Action Report Export:**
+```bash
+GET /api/v1/exports/after-action?workspace_id=W123&start_date=2026-03-01&end_date=2026-03-13
+Accept: application/json
+```
+
+Exports include:
+- Full provenance and citation links
+- Location data (when available)
+- Verification status
+- Risk tier classification
+- Multi-language support (for CAP/EDXL-DE)
+
+---
+
 ## Additional Resources
 
 - **OpenAPI Specification:** `/docs/openapi.yaml`
 - **MongoDB Schema:** `/docs/mongodb_schema.md`
+- **Webhook Guide:** `/docs/webhooks-guide.md`
+- **Analytics Examples:** `/docs/analytics_api_examples.md`
+- **Integration Architecture:** `/docs/integration-architecture-v1.0.md`
+- **Multi-Language Guide:** `/docs/multi-language-guide.md`
 - **Support:** support@aidarena.org
 
 ---
 
-**End of API Guide**
+**End of API Guide - v1.2**
