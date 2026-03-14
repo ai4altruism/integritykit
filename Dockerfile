@@ -13,11 +13,12 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy dependency files
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
 
 # Install production dependencies only
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir .
 
 # Runtime stage
 FROM python:3.11-slim AS runtime

@@ -314,13 +314,19 @@
             hideError();
 
             try {
-                const response = await fetch(`/api/v1/metrics?workspace_id=${encodeURIComponent(workspace)}`);
+                const response = await fetch(`/api/v1/metrics?workspace_id=${encodeURIComponent(workspace)}`, {
+                    headers: {
+                        'X-Test-User-Id': 'U01FACILITATOR',
+                        'X-Test-Team-Id': 'T01DEMO'
+                    }
+                });
 
                 if (!response.ok) {
                     throw new Error(`API error: ${response.status} ${response.statusText}`);
                 }
 
-                const data = await response.json();
+                const json = await response.json();
+                const data = json.data || json;
                 updateDashboard(data);
                 document.getElementById('lastUpdated').textContent =
                     `Last updated: ${new Date().toLocaleTimeString()}`;

@@ -203,12 +203,13 @@ async def generate_draft(
     cluster_collection = get_collection("clusters")
     cluster_ids = []
     async for doc in cluster_collection.find(
-        {"workspace_id": workspace_id},
+        {"slack_workspace_id": workspace_id},
         {"_id": 1},
     ):
         cluster_ids.append(doc["_id"])
 
-    if not cluster_ids:
+    cluster_ids_str = [str(cid) for cid in cluster_ids]
+    if not cluster_ids_str:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No clusters found for workspace",
@@ -227,18 +228,12 @@ async def generate_draft(
             except Exception:
                 pass
     else:
-        # Get all publishable candidates
-        candidates = await candidate_repo.list_by_workspace(
-            cluster_ids=cluster_ids,
-            limit=100,
-        )
-
-        # Filter to verified and in-review
-        if request and not request.include_in_review:
-            candidates = [
-                c for c in candidates
-                if c.readiness_state.value == "verified"
-            ]
+        # Get all candidates by string cluster_id match
+        candidate_collection = get_collection("cop_candidates")
+        candidates = []
+        async for doc in candidate_collection.find({"cluster_id": {"$in": cluster_ids_str}}):
+            from integritykit.models.cop_candidate import COPCandidate
+            candidates.append(COPCandidate(**doc))
 
     if not candidates:
         raise HTTPException(
@@ -280,7 +275,7 @@ async def generate_draft_markdown(
     cluster_collection = get_collection("clusters")
     cluster_ids = []
     async for doc in cluster_collection.find(
-        {"workspace_id": workspace_id},
+        {"slack_workspace_id": workspace_id},
         {"_id": 1},
     ):
         cluster_ids.append(doc["_id"])
@@ -334,7 +329,7 @@ async def generate_draft_slack_blocks(
     cluster_collection = get_collection("clusters")
     cluster_ids = []
     async for doc in cluster_collection.find(
-        {"workspace_id": workspace_id},
+        {"slack_workspace_id": workspace_id},
         {"_id": 1},
     ):
         cluster_ids.append(doc["_id"])
