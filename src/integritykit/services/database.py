@@ -74,7 +74,7 @@ class SignalRepository:
         Args:
             collection: Motor collection instance (optional, uses default if not provided)
         """
-        self.collection = collection or get_collection("signals")
+        self.collection = collection if collection is not None else get_collection("signals")
 
     async def create(self, signal_data: SignalCreate) -> Signal:
         """Create a new signal document.
@@ -242,7 +242,7 @@ class ClusterRepository:
         Args:
             collection: Motor collection instance (optional, uses default if not provided)
         """
-        self.collection = collection or get_collection("clusters")
+        self.collection = collection if collection is not None else get_collection("clusters")
 
     async def create(self, cluster_data: ClusterCreate) -> Cluster:
         """Create a new cluster document.
@@ -441,7 +441,7 @@ class UserRepository:
         Args:
             collection: Motor collection instance (optional, uses default if not provided)
         """
-        self.collection = collection or get_collection("users")
+        self.collection = collection if collection is not None else get_collection("users")
 
     async def create(self, user_data: UserCreate) -> User:
         """Create a new user document.
@@ -900,7 +900,7 @@ class COPCandidateRepository:
         Args:
             collection: Motor collection instance (optional, uses default if not provided)
         """
-        self.collection = collection or get_collection("cop_candidates")
+        self.collection = collection if collection is not None else get_collection("cop_candidates")
 
     async def create(self, candidate_data: COPCandidateCreate) -> COPCandidate:
         """Create a new COP candidate document.

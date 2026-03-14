@@ -11,7 +11,7 @@ services:
       dockerfile: Dockerfile
     container_name: integritykit-app
     ports:
-      - "8000:8000"
+      - "8080:8000"
     environment:
       # MongoDB connection
       - MONGODB_URI=mongodb://mongodb:27017
