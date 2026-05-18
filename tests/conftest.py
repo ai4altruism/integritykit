@@ -11,18 +11,28 @@ This module provides fixtures for:
 All fixtures support async tests via pytest-asyncio.
 """
 
+import os
+
+# Stub required env vars before any test module imports integritykit.config.
+# Several test files transitively pull integritykit.api/services modules,
+# which construct `Settings()` at module load.
+os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-test-token")
+os.environ.setdefault("SLACK_SIGNING_SECRET", "test-signing-secret")
+os.environ.setdefault("SLACK_WORKSPACE_ID", "T01TEST")
+os.environ.setdefault("OPENAI_API_KEY", "sk-test-key")
+
 import asyncio
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
 from bson import ObjectId
-from httpx import AsyncClient
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import AsyncClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 # ChromaDB imports
 try:
@@ -131,9 +141,7 @@ async def mongodb_collections(test_db: AsyncIOMotorDatabase) -> dict[str, Any]:
     await collections["signals"].create_index([("cluster_ids", 1)])
 
     # Create indexes for clusters collection
-    await collections["clusters"].create_index(
-        [("priority_score", -1), ("last_signal_at", -1)]
-    )
+    await collections["clusters"].create_index([("priority_score", -1), ("last_signal_at", -1)])
 
     # Create indexes for cop_candidates collection
     await collections["cop_candidates"].create_index(
@@ -363,9 +371,7 @@ def mock_openai_client() -> MagicMock:
 
     # Configure default successful response
     mock_response = MagicMock()
-    mock_response.choices = [
-        MagicMock(message=MagicMock(content='{"result": "success"}'))
-    ]
+    mock_response.choices = [MagicMock(message=MagicMock(content='{"result": "success"}'))]
     mock.chat.completions.create.return_value = mock_response
 
     return mock
@@ -397,6 +403,40 @@ def mock_slack_client() -> MagicMock:
 # ============================================================================
 # Test Data Markers
 # ============================================================================
+
+
+# ============================================================================
+# SSRF / URL-safety neutralization
+# ============================================================================
+
+
+@pytest.fixture(autouse=True)
+def _stub_ssrf_validation(monkeypatch: Any) -> None:
+    """No-op the SSRF check at its service import sites so tests don't
+    depend on real DNS or HEAD probes.
+
+    Tests for url_safety itself import the function via
+    `integritykit.utils.url_safety` and exercise it directly; this fixture
+    does not patch that module, so those tests run the real implementation.
+
+    Tests that want to exercise the wired-up SSRF behavior (S9-7) can
+    override by re-patching `integritykit.services.webhooks.validate_external_url`
+    or `integritykit.services.external_sources.validate_external_url`
+    inside the test body.
+    """
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    try:
+        from integritykit.services import external_sources, webhooks
+
+        monkeypatch.setattr(webhooks, "validate_external_url", _noop)
+        monkeypatch.setattr(external_sources, "validate_external_url", _noop)
+    except ImportError:
+        # Settings construction may fail when env vars aren't stubbed;
+        # tests that need these services will surface the real error.
+        pass
 
 
 def pytest_configure(config: Any) -> None:

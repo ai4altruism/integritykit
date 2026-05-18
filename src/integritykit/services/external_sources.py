@@ -5,10 +5,9 @@ Implements:
 - Task S8-20: Inbound verification source API
 """
 
-import hashlib
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -16,7 +15,13 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from integritykit.config import settings
-from integritykit.models.cop_candidate import COPCandidate, COPFields, COPWhen, ReadinessState, RiskTier
+from integritykit.models.cop_candidate import (
+    COPCandidate,
+    COPFields,
+    COPWhen,
+    ReadinessState,
+    RiskTier,
+)
 from integritykit.models.external_source import (
     AuthConfig,
     AuthType,
@@ -30,6 +35,7 @@ from integritykit.models.external_source import (
     TrustLevel,
 )
 from integritykit.services.database import get_collection
+from integritykit.utils.url_safety import UnsafeURLError, validate_external_url
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +45,9 @@ class ExternalSourceService:
 
     def __init__(
         self,
-        sources_collection: Optional[AsyncIOMotorCollection] = None,
-        imports_collection: Optional[AsyncIOMotorCollection] = None,
-        candidates_collection: Optional[AsyncIOMotorCollection] = None,
+        sources_collection: AsyncIOMotorCollection | None = None,
+        imports_collection: AsyncIOMotorCollection | None = None,
+        candidates_collection: AsyncIOMotorCollection | None = None,
     ):
         """Initialize external source service.
 
@@ -78,16 +84,14 @@ class ExternalSourceService:
             ValueError: If source_id already exists or endpoint is invalid
         """
         # Validate endpoint URL
-        self._validate_endpoint_url(source_data.api_endpoint)
+        await self._validate_endpoint_url(source_data.api_endpoint)
 
         # Check for duplicate source_id in workspace
         existing = await self.sources.find_one(
             {"workspace_id": workspace_id, "source_id": source_data.source_id}
         )
         if existing:
-            raise ValueError(
-                f"Source with ID {source_data.source_id} already exists"
-            )
+            raise ValueError(f"Source with ID {source_data.source_id} already exists")
 
         # Create source
         source = ExternalSource(
@@ -112,7 +116,7 @@ class ExternalSourceService:
         self,
         source_id: ObjectId,
         workspace_id: str,
-    ) -> Optional[ExternalSource]:
+    ) -> ExternalSource | None:
         """Get external source by ID.
 
         Args:
@@ -122,17 +126,13 @@ class ExternalSourceService:
         Returns:
             External source if found, None otherwise
         """
-        source_dict = await self.sources.find_one(
-            {"_id": source_id, "workspace_id": workspace_id}
-        )
+        source_dict = await self.sources.find_one({"_id": source_id, "workspace_id": workspace_id})
         if not source_dict:
             return None
 
         # Redact sensitive auth config
         if source_dict.get("auth_config"):
-            source_dict["auth_config"] = self._redact_auth_config(
-                source_dict["auth_config"]
-            )
+            source_dict["auth_config"] = self._redact_auth_config(source_dict["auth_config"])
 
         return ExternalSource(**source_dict)
 
@@ -140,7 +140,7 @@ class ExternalSourceService:
         self,
         source_id: str,
         workspace_id: str,
-    ) -> Optional[ExternalSource]:
+    ) -> ExternalSource | None:
         """Get external source by source_id string.
 
         Args:
@@ -158,18 +158,16 @@ class ExternalSourceService:
 
         # Redact sensitive auth config
         if source_dict.get("auth_config"):
-            source_dict["auth_config"] = self._redact_auth_config(
-                source_dict["auth_config"]
-            )
+            source_dict["auth_config"] = self._redact_auth_config(source_dict["auth_config"])
 
         return ExternalSource(**source_dict)
 
     async def list_sources(
         self,
         workspace_id: str,
-        source_type: Optional[str] = None,
-        trust_level: Optional[TrustLevel] = None,
-        enabled: Optional[bool] = None,
+        source_type: str | None = None,
+        trust_level: TrustLevel | None = None,
+        enabled: bool | None = None,
         skip: int = 0,
         limit: int = 50,
     ) -> list[ExternalSource]:
@@ -200,9 +198,7 @@ class ExternalSourceService:
         async for source_dict in cursor:
             # Redact sensitive auth config
             if source_dict.get("auth_config"):
-                source_dict["auth_config"] = self._redact_auth_config(
-                    source_dict["auth_config"]
-                )
+                source_dict["auth_config"] = self._redact_auth_config(source_dict["auth_config"])
             sources.append(ExternalSource(**source_dict))
 
         return sources
@@ -212,7 +208,7 @@ class ExternalSourceService:
         source_id: ObjectId,
         workspace_id: str,
         update_data: ExternalSourceUpdate,
-    ) -> Optional[ExternalSource]:
+    ) -> ExternalSource | None:
         """Update external source configuration.
 
         Args:
@@ -228,7 +224,7 @@ class ExternalSourceService:
         """
         # Validate endpoint URL if provided
         if update_data.api_endpoint:
-            self._validate_endpoint_url(update_data.api_endpoint)
+            await self._validate_endpoint_url(update_data.api_endpoint)
 
         # Build update document
         update_dict = {
@@ -269,9 +265,7 @@ class ExternalSourceService:
         Returns:
             True if deleted, False if not found
         """
-        result = await self.sources.delete_one(
-            {"_id": source_id, "workspace_id": workspace_id}
-        )
+        result = await self.sources.delete_one({"_id": source_id, "workspace_id": workspace_id})
 
         if result.deleted_count > 0:
             logger.info(f"Deleted external source {source_id}")
@@ -312,9 +306,7 @@ class ExternalSourceService:
             ValueError: If source not found or disabled
         """
         # Get source configuration (with non-redacted auth)
-        source_dict = await self.sources.find_one(
-            {"_id": source_id, "workspace_id": workspace_id}
-        )
+        source_dict = await self.sources.find_one({"_id": source_id, "workspace_id": workspace_id})
         if not source_dict:
             raise ValueError("External source not found")
 
@@ -455,29 +447,40 @@ class ExternalSourceService:
     # Helper Methods
     # =========================================================================
 
-    def _validate_endpoint_url(self, url: str) -> None:
-        """Validate external API endpoint URL.
+    async def _validate_endpoint_url(self, url: str) -> None:
+        """Validate external API endpoint URL — scheme then SSRF check.
 
         Args:
             url: URL to validate
 
         Raises:
-            ValueError: If URL is invalid
+            ValueError: If URL is malformed, uses an insecure scheme in
+                production, or resolves to a blocked / private address.
         """
         try:
             parsed = urlparse(url)
-        except Exception:
-            raise ValueError(f"Invalid URL: {url}")
+        except Exception as exc:
+            raise ValueError(f"Invalid URL: {url}") from exc
 
-        # Require HTTPS in production (unless localhost for testing)
-        if not settings.debug and parsed.scheme != "https":
-            if parsed.hostname not in ("localhost", "127.0.0.1"):
-                raise ValueError("External API URLs must use HTTPS in production")
+        # Require HTTPS in production
+        if (
+            not settings.debug
+            and parsed.scheme != "https"
+            and parsed.hostname not in ("localhost", "127.0.0.1")
+        ):
+            raise ValueError("External API URLs must use HTTPS in production")
 
-        # Block private IPs in production
-        if not settings.debug:
-            if parsed.hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
-                raise ValueError("Cannot use localhost URLs in production")
+        # Dev mode preserves the historical localhost-allowed behavior so
+        # developers can point sources at a local test server.
+        if settings.debug:
+            return
+
+        # SSRF check: reject loopback / private / link-local / cloud-metadata
+        # addresses, including those revealed by DNS resolution or redirects.
+        try:
+            await validate_external_url(url)
+        except UnsafeURLError as exc:
+            raise ValueError(f"External source URL rejected by SSRF check: {exc}") from exc
 
     def _redact_auth_config(self, auth_config: dict) -> dict:
         """Redact sensitive fields in auth config.
@@ -506,7 +509,7 @@ class ExternalSourceService:
     def _build_auth_headers(
         self,
         auth_type: AuthType,
-        auth_config: Optional[AuthConfig],
+        auth_config: AuthConfig | None,
     ) -> dict[str, str]:
         """Build authentication headers for external API request.
 
@@ -527,6 +530,7 @@ class ExternalSourceService:
 
         elif auth_type == AuthType.BASIC and auth_config.username and auth_config.password:
             import base64
+
             credentials = f"{auth_config.username}:{auth_config.password}"
             encoded = base64.b64encode(credentials.encode()).decode()
             headers["Authorization"] = f"Basic {encoded}"
@@ -551,8 +555,19 @@ class ExternalSourceService:
             List of raw items from external API
 
         Raises:
-            Exception: If API request fails
+            Exception: If API request fails, including ValueError prefixed
+                with "SSRF:" when the endpoint URL resolves to a blocked
+                / private address at fetch time.
         """
+        # Re-validate at fetch time: DNS or redirect targets may have changed
+        # since the source was created. Dev mode preserves the historical
+        # localhost-allowed behavior.
+        if not settings.debug:
+            try:
+                await validate_external_url(source.api_endpoint)
+            except UnsafeURLError as exc:
+                raise ValueError(f"SSRF: target resolves to private address ({exc})") from exc
+
         timeout_seconds = 30
 
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
@@ -602,7 +617,7 @@ class ExternalSourceService:
             else:
                 raise ValueError(f"Unexpected response format: {type(data)}")
 
-    def _extract_external_id(self, raw_item: dict[str, Any]) -> Optional[str]:
+    def _extract_external_id(self, raw_item: dict[str, Any]) -> str | None:
         """Extract external ID from raw item for deduplication.
 
         Args:
@@ -664,14 +679,16 @@ class ExternalSourceService:
         what = raw_item.get("what") or raw_item.get("description") or raw_item.get("summary") or ""
         where = raw_item.get("where") or raw_item.get("location") or raw_item.get("address") or ""
         who = raw_item.get("who") or raw_item.get("affected") or raw_item.get("reporter") or ""
-        so_what = raw_item.get("so_what") or raw_item.get("impact") or raw_item.get("implications") or ""
+        so_what = (
+            raw_item.get("so_what") or raw_item.get("impact") or raw_item.get("implications") or ""
+        )
 
         # Extract temporal information
         when_timestamp = None
         when_desc = raw_item.get("when", "")
 
         if "timestamp" in raw_item:
-            try:
+            try:  # noqa: SIM105 - readability over contextlib.suppress here
                 when_timestamp = datetime.fromisoformat(str(raw_item["timestamp"]))
             except Exception:
                 pass
@@ -754,7 +771,7 @@ class ExternalSourceService:
         success: bool,
         items_imported: int,
         duplicates_skipped: int,
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         """Update external source statistics.
 

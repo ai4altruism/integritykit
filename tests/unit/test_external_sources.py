@@ -7,7 +7,6 @@ Tests:
 """
 
 import os
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,7 +18,7 @@ os.environ.setdefault("SLACK_SIGNING_SECRET", "test-secret")
 os.environ.setdefault("SLACK_WORKSPACE_ID", "T123TEST")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-key")
 
-from integritykit.models.cop_candidate import COPCandidate, ReadinessState
+from integritykit.models.cop_candidate import ReadinessState
 from integritykit.models.external_source import (
     AuthConfig,
     AuthType,
@@ -27,13 +26,11 @@ from integritykit.models.external_source import (
     ExternalSourceCreate,
     ExternalSourceUpdate,
     ImportRequest,
-    ImportResult,
     ImportStatus,
     SourceType,
     TrustLevel,
 )
 from integritykit.services.external_sources import ExternalSourceService
-
 
 # ============================================================================
 # Fixtures
@@ -128,9 +125,7 @@ class TestExternalSourceCRUD:
         """Create a new external source."""
         # Mock database operations
         mock_sources_collection.find_one.return_value = None  # No duplicate
-        mock_sources_collection.insert_one.return_value = MagicMock(
-            inserted_id=ObjectId()
-        )
+        mock_sources_collection.insert_one.return_value = MagicMock(inserted_id=ObjectId())
 
         # Create source
         source = await external_source_service.create_source(
@@ -268,6 +263,7 @@ class TestExternalSourceCRUD:
         mock_sources_collection,
     ):
         """List sources with filters."""
+
         # Create empty async iterator
         async def async_iter():
             return
@@ -384,9 +380,7 @@ class TestExternalSourceImport:
         # Mock database operations
         mock_imports_collection.find_one.return_value = None  # Not duplicate
         mock_imports_collection.insert_one.return_value = MagicMock()
-        mock_candidates_collection.insert_one.return_value = MagicMock(
-            inserted_id=ObjectId()
-        )
+        mock_candidates_collection.insert_one.return_value = MagicMock(inserted_id=ObjectId())
         mock_sources_collection.update_one.return_value = MagicMock()
 
         # Mock HTTP request
@@ -459,9 +453,7 @@ class TestExternalSourceImport:
         # Mock database operations
         mock_imports_collection.find_one.return_value = None
         mock_imports_collection.insert_one.return_value = MagicMock()
-        mock_candidates_collection.insert_one.return_value = MagicMock(
-            inserted_id=ObjectId()
-        )
+        mock_candidates_collection.insert_one.return_value = MagicMock(inserted_id=ObjectId())
         mock_sources_collection.update_one.return_value = MagicMock()
 
         # Mock HTTP request
@@ -478,7 +470,7 @@ class TestExternalSourceImport:
             mock_client.return_value = mock_context
 
             # Import data (no auto_promote)
-            result = await external_source_service.import_verified_data(
+            await external_source_service.import_verified_data(
                 source_id=medium_source.id,
                 workspace_id="workspace-123",
                 import_request=ImportRequest(auto_promote=False),
@@ -514,9 +506,7 @@ class TestExternalSourceImport:
             None,  # Not duplicate
         ]
         mock_imports_collection.insert_one.return_value = MagicMock()
-        mock_candidates_collection.insert_one.return_value = MagicMock(
-            inserted_id=ObjectId()
-        )
+        mock_candidates_collection.insert_one.return_value = MagicMock(inserted_id=ObjectId())
         mock_sources_collection.update_one.return_value = MagicMock()
 
         # Mock HTTP request
@@ -591,26 +581,27 @@ class TestExternalSourceImport:
 class TestHelperMethods:
     """Test helper methods."""
 
-    def test_validate_endpoint_url_https(self, external_source_service):
+    @pytest.mark.asyncio
+    async def test_validate_endpoint_url_https(self, external_source_service):
         """Valid HTTPS URL passes validation."""
         # Should not raise
-        external_source_service._validate_endpoint_url("https://api.example.com")
+        await external_source_service._validate_endpoint_url("https://api.example.com")
 
-    def test_validate_endpoint_url_http_debug(self, external_source_service):
+    @pytest.mark.asyncio
+    async def test_validate_endpoint_url_http_debug(self, external_source_service):
         """HTTP URL allowed in debug mode."""
         with patch("integritykit.services.external_sources.settings") as mock_settings:
             mock_settings.debug = True
             # Should not raise
-            external_source_service._validate_endpoint_url("http://localhost:8000")
+            await external_source_service._validate_endpoint_url("http://localhost:8000")
 
-    def test_validate_endpoint_url_http_production(self, external_source_service):
+    @pytest.mark.asyncio
+    async def test_validate_endpoint_url_http_production(self, external_source_service):
         """HTTP URL rejected in production."""
         with patch("integritykit.services.external_sources.settings") as mock_settings:
             mock_settings.debug = False
             with pytest.raises(ValueError, match="must use HTTPS"):
-                external_source_service._validate_endpoint_url(
-                    "http://api.example.com"
-                )
+                await external_source_service._validate_endpoint_url("http://api.example.com")
 
     def test_redact_auth_config(self, external_source_service):
         """Sensitive fields are redacted."""
@@ -630,9 +621,7 @@ class TestHelperMethods:
         """Build bearer token auth headers."""
         auth_config = AuthConfig(token="test_token")
 
-        headers = external_source_service._build_auth_headers(
-            AuthType.BEARER, auth_config
-        )
+        headers = external_source_service._build_auth_headers(AuthType.BEARER, auth_config)
 
         assert headers["Authorization"] == "Bearer test_token"
 
@@ -640,9 +629,7 @@ class TestHelperMethods:
         """Build API key auth headers."""
         auth_config = AuthConfig(key_name="X-API-Key", key_value="api_key_123")
 
-        headers = external_source_service._build_auth_headers(
-            AuthType.API_KEY, auth_config
-        )
+        headers = external_source_service._build_auth_headers(AuthType.API_KEY, auth_config)
 
         assert headers["X-API-Key"] == "api_key_123"
 
@@ -652,14 +639,8 @@ class TestHelperMethods:
         assert external_source_service._extract_external_id({"id": "123"}) == "123"
 
         # Alternative field names
-        assert (
-            external_source_service._extract_external_id({"incident_id": "456"})
-            == "456"
-        )
-        assert (
-            external_source_service._extract_external_id({"external_id": "789"})
-            == "789"
-        )
+        assert external_source_service._extract_external_id({"incident_id": "456"}) == "456"
+        assert external_source_service._extract_external_id({"external_id": "789"}) == "789"
 
         # No ID field
         assert external_source_service._extract_external_id({"name": "test"}) is None
