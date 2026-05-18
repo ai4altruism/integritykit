@@ -2,15 +2,19 @@
 
 Implements:
 - FR-ROLE-002: Role-based access enforcement via dependency injection
-- Slack OAuth authentication
+- Slack OAuth authentication (S9-1)
 - Permission-based route protection
 """
 
-from typing import Annotated, Callable, Optional
+import time
+from collections.abc import Callable
+from typing import Annotated
 
-from bson import ObjectId
+import structlog
 from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
+from slack_sdk.errors import SlackApiError
+from slack_sdk.web.async_client import AsyncWebClient
 
 from integritykit.models.user import Permission, User, UserRole
 from integritykit.services.database import UserRepository, get_collection
@@ -21,14 +25,77 @@ from integritykit.services.rbac import (
     get_rbac_service,
 )
 
+logger = structlog.get_logger(__name__)
+
 
 class TokenPayload(BaseModel):
     """Decoded token payload from Slack OAuth."""
 
     user_id: str
     team_id: str
-    email: Optional[str] = None
-    name: Optional[str] = None
+    email: str | None = None
+    name: str | None = None
+
+
+# Module-level cache for Slack auth.test results.
+# Keyed by token, value is (expires_at_monotonic, payload). Short TTL keeps
+# revocation latency low while avoiding a Slack API round-trip per request.
+_OAUTH_CACHE_TTL_SECONDS: float = 60.0
+_oauth_cache: dict[str, tuple[float, TokenPayload]] = {}
+
+
+def _clear_oauth_cache() -> None:
+    """Test helper: drop all cached Slack tokens."""
+    _oauth_cache.clear()
+
+
+async def _validate_slack_token(token: str) -> TokenPayload:
+    """Validate a Slack bearer token via auth.test, returning identity claims.
+
+    Results are cached for `_OAUTH_CACHE_TTL_SECONDS` per token. Raises
+    HTTPException(401) on any failure (network, Slack error, missing fields).
+    """
+    now = time.monotonic()
+    cached = _oauth_cache.get(token)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    client = AsyncWebClient(token=token)
+    try:
+        response = await client.auth_test()
+    except SlackApiError as exc:
+        slack_error = exc.response.get("error") if getattr(exc, "response", None) else None
+        logger.warning("Slack auth.test rejected token", error=slack_error)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Slack token",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    if not response.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Slack token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        payload = TokenPayload(
+            user_id=response["user_id"],
+            team_id=response["team_id"],
+            email=None,  # auth.test does not return email; users.info would
+            name=response.get("user"),
+        )
+    except KeyError as exc:
+        logger.error("Slack auth.test response missing required field", field=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Slack token",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    _oauth_cache[token] = (now + _OAUTH_CACHE_TTL_SECONDS, payload)
+    return payload
 
 
 # Dependency to get user repository
@@ -53,7 +120,7 @@ def get_rbac() -> RBACService:
 
 async def get_current_user_from_token(
     request: Request,
-    authorization: Annotated[Optional[str], Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
     user_repo: UserRepository = Depends(get_user_repository),
 ) -> User:
     """Extract and validate current user from request.
@@ -92,16 +159,16 @@ async def get_current_user_from_token(
         return request.state.user
 
     # Check Authorization header
-    if authorization:
-        if authorization.startswith("Bearer "):
-            token = authorization[7:]
-            # TODO: Validate Slack OAuth token and get user info
-            # For now, return 401 until Slack OAuth is implemented
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Slack OAuth not yet implemented",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+        payload = await _validate_slack_token(token)
+        user, _ = await user_repo.get_or_create_by_slack_id(
+            slack_user_id=payload.user_id,
+            slack_team_id=payload.team_id,
+            slack_display_name=payload.name,
+            slack_email=payload.email,
+        )
+        return user
 
     # No authentication provided
     raise HTTPException(
@@ -139,16 +206,16 @@ def require_permission(permission: Permission) -> Callable:
     ) -> None:
         try:
             rbac.require_permission(user, permission)
-        except UserSuspendedError:
+        except UserSuspendedError as exc:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account suspended",
-            )
-        except AccessDeniedError as e:
+            ) from exc
+        except AccessDeniedError as exc:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=e.message,
-            )
+                detail=exc.message,
+            ) from exc
 
     return check_permission
 
@@ -177,16 +244,16 @@ def require_role(role: UserRole) -> Callable:
     ) -> None:
         try:
             rbac.require_role(user, role)
-        except UserSuspendedError:
+        except UserSuspendedError as exc:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account suspended",
-            )
-        except AccessDeniedError as e:
+            ) from exc
+        except AccessDeniedError as exc:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=e.message,
-            )
+                detail=exc.message,
+            ) from exc
 
     return check_role
 
@@ -207,16 +274,16 @@ def require_any_role(roles: list[UserRole]) -> Callable:
     ) -> None:
         try:
             rbac.require_any_role(user, roles)
-        except UserSuspendedError:
+        except UserSuspendedError as exc:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account suspended",
-            )
-        except AccessDeniedError as e:
+            ) from exc
+        except AccessDeniedError as exc:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=e.message,
-            )
+                detail=exc.message,
+            ) from exc
 
     return check_roles
 
@@ -238,9 +305,9 @@ RequireViewMetrics = Depends(require_permission(Permission.VIEW_METRICS))
 
 async def get_current_user_optional(
     request: Request,
-    authorization: Annotated[Optional[str], Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
     user_repo: UserRepository = Depends(get_user_repository),
-) -> Optional[User]:
+) -> User | None:
     """Get current user if authenticated, otherwise return None.
 
     Useful for endpoints that behave differently for authenticated users.
@@ -260,4 +327,4 @@ async def get_current_user_optional(
 
 
 # Type alias for optional current user
-OptionalUser = Annotated[Optional[User], Depends(get_current_user_optional)]
+OptionalUser = Annotated[User | None, Depends(get_current_user_optional)]
