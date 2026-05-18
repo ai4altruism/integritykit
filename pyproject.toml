@@ -1,6 +1,6 @@
 [project]
 name = "integritykit"
-version = "0.4.0"
+version = "1.0.1"
 description = "Aid Arena Integrity Kit - Slack coordination layer for crisis-response COP updates"
 readme = "README.md"
 requires-python = ">=3.11"
