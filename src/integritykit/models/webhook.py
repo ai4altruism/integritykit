@@ -7,10 +7,10 @@ Implements:
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from bson import ObjectId
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field
 
 from integritykit.models.signal import PyObjectId
 
@@ -43,6 +43,7 @@ class WebhookStatus(str, Enum):
     FAILED = "failed"
     PENDING = "pending"
     RETRYING = "retrying"
+    BLOCKED_SSRF = "blocked_ssrf"
 
 
 class RetryConfig(BaseModel):
@@ -80,22 +81,22 @@ class AuthConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     # Bearer token
-    token: Optional[str] = None
+    token: str | None = None
 
     # Basic auth
-    username: Optional[str] = None
-    password: Optional[str] = None
+    username: str | None = None
+    password: str | None = None
 
     # API key / Custom header
-    key_name: Optional[str] = None
-    key_value: Optional[str] = None
-    header_name: Optional[str] = None
-    header_value: Optional[str] = None
+    key_name: str | None = None
+    key_value: str | None = None
+    header_name: str | None = None
+    header_value: str | None = None
 
     # OAuth2
-    client_id: Optional[str] = None
-    client_secret: Optional[str] = None
-    token_url: Optional[str] = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    token_url: str | None = None
 
 
 class WebhookStatistics(BaseModel):
@@ -105,15 +106,15 @@ class WebhookStatistics(BaseModel):
     successful_deliveries: int = Field(default=0, description="Successful deliveries")
     failed_deliveries: int = Field(default=0, description="Failed deliveries")
     success_rate: float = Field(default=0.0, description="Success rate (0.0 to 1.0)")
-    last_success_at: Optional[datetime] = Field(
+    last_success_at: datetime | None = Field(
         default=None,
         description="Timestamp of last successful delivery",
     )
-    last_failure_at: Optional[datetime] = Field(
+    last_failure_at: datetime | None = Field(
         default=None,
         description="Timestamp of last failed delivery",
     )
-    last_error: Optional[str] = Field(
+    last_error: str | None = Field(
         default=None,
         description="Last error message",
     )
@@ -128,7 +129,7 @@ class Webhook(BaseModel):
         json_encoders={ObjectId: str},
     )
 
-    id: Optional[PyObjectId] = Field(default=None, alias="_id")
+    id: PyObjectId | None = Field(default=None, alias="_id")
     workspace_id: str = Field(
         ...,
         description="Workspace ID this webhook belongs to",
@@ -152,7 +153,7 @@ class Webhook(BaseModel):
         default=AuthType.NONE,
         description="Authentication type",
     )
-    auth_config: Optional[AuthConfig] = Field(
+    auth_config: AuthConfig | None = Field(
         default=None,
         description="Authentication configuration (encrypted at rest)",
     )
@@ -204,11 +205,11 @@ class WebhookCreate(BaseModel):
         default=AuthType.NONE,
         description="Authentication type",
     )
-    auth_config: Optional[AuthConfig] = Field(
+    auth_config: AuthConfig | None = Field(
         default=None,
         description="Authentication configuration",
     )
-    retry_config: Optional[RetryConfig] = Field(
+    retry_config: RetryConfig | None = Field(
         default=None,
         description="Retry configuration",
     )
@@ -221,34 +222,34 @@ class WebhookCreate(BaseModel):
 class WebhookUpdate(BaseModel):
     """Request model for updating a webhook."""
 
-    name: Optional[str] = Field(
+    name: str | None = Field(
         default=None,
         min_length=3,
         max_length=100,
         description="Descriptive webhook name",
     )
-    url: Optional[str] = Field(
+    url: str | None = Field(
         default=None,
         description="Target webhook URL",
     )
-    events: Optional[list[WebhookEvent]] = Field(
+    events: list[WebhookEvent] | None = Field(
         default=None,
         min_length=1,
         description="Event types",
     )
-    auth_type: Optional[AuthType] = Field(
+    auth_type: AuthType | None = Field(
         default=None,
         description="Authentication type",
     )
-    auth_config: Optional[AuthConfig] = Field(
+    auth_config: AuthConfig | None = Field(
         default=None,
         description="Authentication configuration",
     )
-    retry_config: Optional[RetryConfig] = Field(
+    retry_config: RetryConfig | None = Field(
         default=None,
         description="Retry configuration",
     )
-    enabled: Optional[bool] = Field(
+    enabled: bool | None = Field(
         default=None,
         description="Enable/disable webhook",
     )
@@ -263,7 +264,7 @@ class WebhookDelivery(BaseModel):
         json_encoders={ObjectId: str},
     )
 
-    id: Optional[PyObjectId] = Field(default=None, alias="_id")
+    id: PyObjectId | None = Field(default=None, alias="_id")
     webhook_id: PyObjectId = Field(
         ...,
         description="Webhook that was triggered",
@@ -284,20 +285,20 @@ class WebhookDelivery(BaseModel):
         ...,
         description="Delivery status",
     )
-    http_status_code: Optional[int] = Field(
+    http_status_code: int | None = Field(
         default=None,
         description="HTTP response code",
     )
-    response_time_ms: Optional[int] = Field(
+    response_time_ms: int | None = Field(
         default=None,
         description="Response time in milliseconds",
     )
-    response_body: Optional[str] = Field(
+    response_body: str | None = Field(
         default=None,
         max_length=10000,
         description="Response body (truncated)",
     )
-    error_message: Optional[str] = Field(
+    error_message: str | None = Field(
         default=None,
         description="Error message if delivery failed",
     )
@@ -309,7 +310,7 @@ class WebhookDelivery(BaseModel):
         default_factory=datetime.utcnow,
         description="When delivery was attempted",
     )
-    next_retry_at: Optional[datetime] = Field(
+    next_retry_at: datetime | None = Field(
         default=None,
         description="When to retry next (if applicable)",
     )
@@ -347,20 +348,20 @@ class WebhookTestResult(BaseModel):
         ...,
         description="Whether test delivery succeeded",
     )
-    status_code: Optional[int] = Field(
+    status_code: int | None = Field(
         default=None,
         description="HTTP status code",
     )
-    response_time_ms: Optional[int] = Field(
+    response_time_ms: int | None = Field(
         default=None,
         description="Response time in milliseconds",
     )
-    response_body: Optional[str] = Field(
+    response_body: str | None = Field(
         default=None,
         max_length=1000,
         description="Response body (truncated)",
     )
-    error: Optional[str] = Field(
+    error: str | None = Field(
         default=None,
         description="Error message if test failed",
     )

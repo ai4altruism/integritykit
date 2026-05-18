@@ -86,7 +86,10 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
-ignore = ["E501", "B008"]  # B008: Allow Query/Depends in FastAPI defaults
+# B008: Allow Query/Depends in FastAPI defaults.
+# UP042: Project consistently uses `class X(str, Enum)` (45 instances); the
+# StrEnum migration would change `str(member)` behavior and is out of scope.
+ignore = ["E501", "B008", "UP042"]
 
 [tool.mypy]
 python_version = "3.11"

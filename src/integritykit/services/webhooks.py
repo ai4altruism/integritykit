@@ -8,11 +8,10 @@ Implements:
 import asyncio
 import hashlib
 import hmac
-import json
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -33,6 +32,7 @@ from integritykit.models.webhook import (
     WebhookUpdate,
 )
 from integritykit.services.database import get_collection
+from integritykit.utils.url_safety import UnsafeURLError, validate_external_url
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,8 @@ class WebhookService:
 
     def __init__(
         self,
-        webhooks_collection: Optional[AsyncIOMotorCollection] = None,
-        deliveries_collection: Optional[AsyncIOMotorCollection] = None,
+        webhooks_collection: AsyncIOMotorCollection | None = None,
+        deliveries_collection: AsyncIOMotorCollection | None = None,
     ):
         """Initialize webhook service.
 
@@ -78,7 +78,7 @@ class WebhookService:
             ValueError: If URL is invalid or webhook already exists
         """
         # Validate URL
-        self._validate_webhook_url(webhook_data.url)
+        await self._validate_webhook_url(webhook_data.url)
 
         # Check for duplicate URL in workspace
         existing = await self.webhooks.find_one(
@@ -110,7 +110,7 @@ class WebhookService:
         self,
         webhook_id: ObjectId,
         workspace_id: str,
-    ) -> Optional[Webhook]:
+    ) -> Webhook | None:
         """Get webhook by ID.
 
         Args:
@@ -128,16 +128,14 @@ class WebhookService:
 
         # Redact sensitive auth config
         if webhook_dict.get("auth_config"):
-            webhook_dict["auth_config"] = self._redact_auth_config(
-                webhook_dict["auth_config"]
-            )
+            webhook_dict["auth_config"] = self._redact_auth_config(webhook_dict["auth_config"])
 
         return Webhook(**webhook_dict)
 
     async def list_webhooks(
         self,
         workspace_id: str,
-        enabled: Optional[bool] = None,
+        enabled: bool | None = None,
         skip: int = 0,
         limit: int = 50,
     ) -> list[Webhook]:
@@ -162,9 +160,7 @@ class WebhookService:
         async for webhook_dict in cursor:
             # Redact sensitive auth config
             if webhook_dict.get("auth_config"):
-                webhook_dict["auth_config"] = self._redact_auth_config(
-                    webhook_dict["auth_config"]
-                )
+                webhook_dict["auth_config"] = self._redact_auth_config(webhook_dict["auth_config"])
             webhooks.append(Webhook(**webhook_dict))
 
         return webhooks
@@ -174,7 +170,7 @@ class WebhookService:
         webhook_id: ObjectId,
         workspace_id: str,
         update_data: WebhookUpdate,
-    ) -> Optional[Webhook]:
+    ) -> Webhook | None:
         """Update webhook configuration.
 
         Args:
@@ -190,7 +186,7 @@ class WebhookService:
         """
         # Validate URL if provided
         if update_data.url:
-            self._validate_webhook_url(update_data.url)
+            await self._validate_webhook_url(update_data.url)
 
         # Build update document
         update_dict = {
@@ -231,9 +227,7 @@ class WebhookService:
         Returns:
             True if deleted, False if not found
         """
-        result = await self.webhooks.delete_one(
-            {"_id": webhook_id, "workspace_id": workspace_id}
-        )
+        result = await self.webhooks.delete_one({"_id": webhook_id, "workspace_id": workspace_id})
 
         if result.deleted_count > 0:
             logger.info(f"Deleted webhook {webhook_id}")
@@ -250,7 +244,7 @@ class WebhookService:
         event_type: WebhookEvent,
         workspace_id: str,
         event_data: dict[str, Any],
-        event_id: Optional[str] = None,
+        event_id: str | None = None,
     ) -> list[str]:
         """Trigger webhooks for an event.
 
@@ -301,9 +295,7 @@ class WebhookService:
             triggered_ids.append(str(webhook.id))
 
             # Schedule delivery in background
-            asyncio.create_task(
-                self._deliver_webhook_with_retry(webhook, payload)
-            )
+            asyncio.create_task(self._deliver_webhook_with_retry(webhook, payload))
 
         logger.info(
             f"Triggered {len(triggered_ids)} webhooks for event {event_type} "
@@ -336,6 +328,20 @@ class WebhookService:
             raise ValueError("Webhook not found")
 
         webhook = Webhook(**webhook_dict)
+
+        # SSRF re-check: reject test deliveries whose URL is unsafe.
+        # Dev mode preserves the historical localhost-allowed behavior.
+        if not settings.debug:
+            try:
+                await validate_external_url(webhook.url)
+            except UnsafeURLError as exc:
+                return WebhookTestResult(
+                    success=False,
+                    status_code=None,
+                    response_time_ms=0,
+                    response_body=None,
+                    error=f"SSRF: {exc}",
+                )
 
         # Build test payload
         payload = WebhookPayload(
@@ -416,23 +422,26 @@ class WebhookService:
             )
 
             # Attempt delivery
-            success, status_code, response_time_ms, response_body, error = (
-                await self._attempt_delivery(webhook, payload)
-            )
+            (
+                status,
+                status_code,
+                response_time_ms,
+                response_body,
+                error,
+            ) = await self._attempt_delivery(webhook, payload)
 
             # Update delivery record
-            delivery.status = WebhookStatus.SUCCESS if success else WebhookStatus.FAILED
+            delivery.status = status
             delivery.http_status_code = status_code
             delivery.response_time_ms = response_time_ms
             delivery.response_body = response_body[:10000] if response_body else None
             delivery.error_message = error
 
             # Save delivery record
-            await self.deliveries.insert_one(
-                delivery.model_dump(by_alias=True, exclude={"id"})
-            )
+            await self.deliveries.insert_one(delivery.model_dump(by_alias=True, exclude={"id"}))
 
             # Update webhook statistics
+            success = status == WebhookStatus.SUCCESS
             await self._update_webhook_statistics(webhook.id, success, error)
 
             if success:
@@ -442,9 +451,15 @@ class WebhookService:
                 )
                 return
 
+            # SSRF-blocked deliveries are a permanent configuration failure;
+            # retrying would not help and could pile on log noise.
+            if status == WebhookStatus.BLOCKED_SSRF:
+                logger.error(f"Webhook {webhook.id} delivery blocked by SSRF check. Error: {error}")
+                return
+
             # If not successful and not last attempt, schedule retry
             if attempt < max_retries:
-                delay = base_delay * (multiplier ** attempt)
+                delay = base_delay * (multiplier**attempt)
                 logger.warning(
                     f"Webhook {webhook.id} delivery failed (attempt {attempt + 1}/"
                     f"{max_retries + 1}). Retrying in {delay}s. Error: {error}"
@@ -460,7 +475,7 @@ class WebhookService:
         self,
         webhook: Webhook,
         payload: WebhookPayload,
-    ) -> tuple[bool, Optional[int], int, Optional[str], Optional[str]]:
+    ) -> tuple[WebhookStatus, int | None, int, str | None, str | None]:
         """Attempt webhook delivery.
 
         Args:
@@ -468,9 +483,27 @@ class WebhookService:
             payload: Webhook payload
 
         Returns:
-            Tuple of (success, status_code, response_time_ms, response_body, error)
+            Tuple of (status, status_code, response_time_ms, response_body, error).
+            Status is BLOCKED_SSRF when the URL fails the safety check at
+            delivery time, SUCCESS on 2xx, FAILED otherwise.
         """
         start_time = time.time()
+
+        # Re-validate the URL at delivery time: DNS records and redirect
+        # targets can change between webhook creation and delivery. Dev mode
+        # preserves the historical localhost-allowed behavior.
+        if not settings.debug:
+            try:
+                await validate_external_url(webhook.url)
+            except UnsafeURLError as exc:
+                response_time_ms = int((time.time() - start_time) * 1000)
+                return (
+                    WebhookStatus.BLOCKED_SSRF,
+                    None,
+                    response_time_ms,
+                    None,
+                    f"SSRF: {exc}",
+                )
 
         try:
             timeout_seconds = getattr(settings, "webhook_timeout_seconds", 10)
@@ -500,10 +533,11 @@ class WebhookService:
 
                 # Consider 2xx as success, 4xx as permanent failure (don't retry)
                 success = 200 <= response.status_code < 300
+                status = WebhookStatus.SUCCESS if success else WebhookStatus.FAILED
                 error = None if success else f"HTTP {response.status_code}"
 
                 return (
-                    success,
+                    status,
                     response.status_code,
                     response_time_ms,
                     response.text,
@@ -512,11 +546,17 @@ class WebhookService:
 
         except httpx.TimeoutException as e:
             response_time_ms = int((time.time() - start_time) * 1000)
-            return False, None, response_time_ms, None, f"Timeout: {str(e)}"
+            return (
+                WebhookStatus.FAILED,
+                None,
+                response_time_ms,
+                None,
+                f"Timeout: {str(e)}",
+            )
 
         except Exception as e:
             response_time_ms = int((time.time() - start_time) * 1000)
-            return False, None, response_time_ms, None, str(e)
+            return WebhookStatus.FAILED, None, response_time_ms, None, str(e)
 
     # =========================================================================
     # Delivery History
@@ -526,8 +566,8 @@ class WebhookService:
         self,
         webhook_id: ObjectId,
         workspace_id: str,
-        status: Optional[WebhookStatus] = None,
-        start_time: Optional[datetime] = None,
+        status: WebhookStatus | None = None,
+        start_time: datetime | None = None,
         skip: int = 0,
         limit: int = 50,
     ) -> list[WebhookDelivery]:
@@ -545,9 +585,7 @@ class WebhookService:
             List of delivery records
         """
         # Verify webhook belongs to workspace
-        webhook = await self.webhooks.find_one(
-            {"_id": webhook_id, "workspace_id": workspace_id}
-        )
+        webhook = await self.webhooks.find_one({"_id": webhook_id, "workspace_id": workspace_id})
         if not webhook:
             return []
 
@@ -559,12 +597,7 @@ class WebhookService:
             query["timestamp"] = {"$gte": start_time}
 
         # Query deliveries
-        cursor = (
-            self.deliveries.find(query)
-            .sort("timestamp", -1)
-            .skip(skip)
-            .limit(limit)
-        )
+        cursor = self.deliveries.find(query).sort("timestamp", -1).skip(skip).limit(limit)
 
         deliveries = []
         async for delivery_dict in cursor:
@@ -576,34 +609,45 @@ class WebhookService:
     # Helper Methods
     # =========================================================================
 
-    def _validate_webhook_url(self, url: str) -> None:
-        """Validate webhook URL.
+    async def _validate_webhook_url(self, url: str) -> None:
+        """Validate webhook URL — scheme, then SSRF / private-address checks.
 
         Args:
             url: URL to validate
 
         Raises:
-            ValueError: If URL is invalid
+            ValueError: If URL is malformed, uses an insecure scheme in
+                production, or resolves to a blocked / private address.
         """
         try:
             parsed = urlparse(url)
-        except Exception:
-            raise ValueError(f"Invalid URL: {url}")
+        except Exception as exc:
+            raise ValueError(f"Invalid URL: {url}") from exc
 
-        # Require HTTPS in production (unless localhost for testing)
-        if not settings.debug and parsed.scheme != "https":
-            if parsed.hostname not in ("localhost", "127.0.0.1"):
-                raise ValueError("Webhook URLs must use HTTPS in production")
+        # Require HTTPS in production
+        if (
+            not settings.debug
+            and parsed.scheme != "https"
+            and parsed.hostname not in ("localhost", "127.0.0.1")
+        ):
+            raise ValueError("Webhook URLs must use HTTPS in production")
 
-        # Block private IPs in production
-        if not settings.debug:
-            if parsed.hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
-                raise ValueError("Cannot use localhost URLs in production")
+        # Dev mode preserves the historical localhost-allowed behavior so
+        # developers can point webhooks at a local listener.
+        if settings.debug:
+            return
+
+        # SSRF check: reject loopback / private / link-local / cloud-metadata
+        # addresses, including those revealed by DNS resolution or redirects.
+        try:
+            await validate_external_url(url)
+        except UnsafeURLError as exc:
+            raise ValueError(f"Webhook URL rejected by SSRF check: {exc}") from exc
 
     def _build_auth_headers(
         self,
         auth_type: AuthType,
-        auth_config: Optional[AuthConfig],
+        auth_config: AuthConfig | None,
     ) -> dict[str, str]:
         """Build authentication headers.
 
@@ -624,6 +668,7 @@ class WebhookService:
 
         elif auth_type == AuthType.BASIC and auth_config.username and auth_config.password:
             import base64
+
             credentials = f"{auth_config.username}:{auth_config.password}"
             encoded = base64.b64encode(credentials.encode()).decode()
             headers["Authorization"] = f"Basic {encoded}"
@@ -631,7 +676,11 @@ class WebhookService:
         elif auth_type == AuthType.API_KEY and auth_config.key_name and auth_config.key_value:
             headers[auth_config.key_name] = auth_config.key_value
 
-        elif auth_type == AuthType.CUSTOM_HEADER and auth_config.header_name and auth_config.header_value:
+        elif (
+            auth_type == AuthType.CUSTOM_HEADER
+            and auth_config.header_name
+            and auth_config.header_value
+        ):
             headers[auth_config.header_name] = auth_config.header_value
 
         return headers
@@ -680,7 +729,7 @@ class WebhookService:
         self,
         webhook_id: ObjectId,
         success: bool,
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         """Update webhook delivery statistics.
 
@@ -692,7 +741,9 @@ class WebhookService:
         update = {
             "$inc": {
                 "statistics.total_deliveries": 1,
-                "statistics.successful_deliveries" if success else "statistics.failed_deliveries": 1,
+                "statistics.successful_deliveries"
+                if success
+                else "statistics.failed_deliveries": 1,
             },
         }
 
